@@ -1,2 +1,4 @@
+import uvicorn
+
 def main() -> None:
-    print("Hello from server!")
+    uvicorn.run("server.main:app", host="127.0.0.1", port=8000, reload=True, app_dir="src")
