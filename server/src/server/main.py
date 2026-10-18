@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from google.genai import Client, types
 from .dependencies import get_client
 from .config import system_instruction, GeminiPrompt
+from .dependencies import check_rate_limit
 from .exceptions import GeminiException
 
 app = FastAPI()
@@ -13,7 +14,7 @@ def home():
     }
 
 @app.post('/chat')
-def chat(prompt:GeminiPrompt):
+def chat(prompt:GeminiPrompt,_=Depends(check_rate_limit)):
     try:
         client = get_client()
         
