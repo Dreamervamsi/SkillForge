@@ -1,5 +1,5 @@
 import json
-from fastapi import FastAPI, Depends, HTTPException, Response
+from fastapi import FastAPI, Depends, HTTPException, Response, Request
 from google.genai import types
 from .dependencies import get_client, get_current_user
 from .config import system_instruction, evaluation_instruction, GeminiPrompt, EvaluationRequest, UserRegister, UserLogin, Token, ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_DAYS
@@ -19,57 +19,111 @@ def home():
 
 @app.post('/register')
 async def register(user: UserRegister, response: Response):
-    """
-    Register a new user with JWT authentication.
-    - Stores user in database
-    - Checks if user already exists
-    - Generates access token (stored in-memory)
-    - Generates refresh token (stored in HTTP-only cookie)
-    """
+    try:
+        prisma = await get_prisma()
+        
+        # Check if user already exists
+        existing_user = await prisma.user.find_first(
+            where={
+                'OR': [
+                    {'username': user.username},
+                    {'email': user.email}
+                ]
+            }
+        )
+        if existing_user:
+            raise HTTPException(status_code=400, detail="User already exists")
+        
+        # Hash the password
+        hashed_password = get_password_hash(user.password)
+        
+        # Create user in database
+        new_user = await prisma.user.create({
+            'username': user.username,
+            'email': user.email,
+            'hashedPassword': hashed_password
+        })
+        
+        # Generate access token
+        access_token = create_access_token(
+            data={"sub": new_user.username, "user_id": new_user.id},
+            expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        )
+        
+        # Generate refresh token
+        refresh_token, expires_at = create_refresh_token_with_expiry()
+        
+        # refresh token in database
+        await prisma.refreshtoken.create({
+            'token': refresh_token,
+            'userId': new_user.id,
+            'expiresAt': expires_at
+        })
+        
+        # access token in-memory
+        active_access_tokens[access_token] = new_user.id
+        
+        # refresh token in HTTP-only cookie
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+        )
+        
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "username": new_user.username,
+            "email": new_user.email
+        }
+    except Exception as e:
+        print(str(e))
+        return {
+            "status":"Failure",
+            "Message": "Internal error at register route"
+        }
+
+@app.post('/login')
+async def login(user: UserLogin, response: Response):
     prisma = await get_prisma()
-    
-    # Check if user already exists
+        
     existing_user = await prisma.user.find_first(
         where={
-            'OR': [
-                {'username': user.username},
-                {'email': user.email}
-            ]
+            'email': user.email
         }
     )
-    if existing_user:
-        raise HTTPException(status_code=400, detail="User already exists")
+    if existing_user is None:
+        raise HTTPException(status_code=404, detail="User not found")
     
-    # Hash the password
-    hashed_password = get_password_hash(user.password)
+    hashed_password_from_db = existing_user.hashedPassword
+    is_valid = verify_password(user.password, hashed_password_from_db)
     
-    # Create user in database
-    new_user = await prisma.user.create({
-        'username': user.username,
-        'email': user.email,
-        'hashedPassword': hashed_password
-    })
+    if not is_valid:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
     
-    # Generate access token
+    # Create access token
     access_token = create_access_token(
-        data={"sub": new_user.username, "user_id": new_user.id},
+        data={"sub": existing_user.username, "user_id": existing_user.id},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
-    
-    # Generate refresh token with expiry
+        
+    # Generate refresh token
     refresh_token, expires_at = create_refresh_token_with_expiry()
-    
-    # Store refresh token in database
+        
+    # refresh token in database
     await prisma.refreshtoken.create({
         'token': refresh_token,
-        'userId': new_user.id,
+        'userId': existing_user.id,
         'expiresAt': expires_at
     })
     
-    # Store access token in-memory
-    active_access_tokens[access_token] = new_user.id
+    # access token in-memory
+    active_access_tokens[access_token] = existing_user.id
     
-    # Set refresh token in HTTP-only cookie
+    # refresh token in HTTP-only cookie
     response.set_cookie(
         key="refresh_token",
         value=refresh_token,
@@ -82,40 +136,79 @@ async def register(user: UserRegister, response: Response):
     return {
         "access_token": access_token,
         "token_type": "bearer",
-        "username": new_user.username,
-        "email": new_user.email
+        "username": existing_user.username,
+        "email": existing_user.email
     }
 
-@app.post('/login')
-async def login(user: UserLogin):
-    """
-    Login a user and return a JWT token.
-    Note: This is a boilerplate. In production, you should:
-    - Retrieve user from database
-    - Verify the hashed password
-    - Handle invalid credentials
-    """
-    # TODO: Retrieve user from database and verify password
-    # For now, just generate a token
+@app.post('/refresh')
+async def refresh(request: Request, response: Response):
+    prisma = await get_prisma()
     
-    # Verify password (mock - in production, compare with database)
-    # is_valid = verify_password(user.password, hashed_password_from_db)
+    refresh_token = request.cookies.get("refresh_token")
+    if not refresh_token:
+        raise HTTPException(status_code=401, detail="Refresh token not found")
     
-    # Create access token
-    access_token = create_access_token(
-        data={"sub": user.username},
-        expires_delta=timedelta(minutes=30)
+    token_record = await prisma.refreshtoken.find_unique(
+        where={'token': refresh_token}
     )
     
-    return Token(access_token=access_token, token_type="bearer")
-
-@app.get('/protected')
-async def protected_route(current_user: str = Depends(get_current_user)):
-    """
-    Example of a protected route that requires authentication.
-    """
+    if not token_record:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    
+    # Check if refresh token has expired
+    from datetime import datetime
+    if token_record.expiresAt < datetime.utcnow():
+        # Delete expired token
+        await prisma.refreshtoken.delete(
+            where={'token': refresh_token}
+        )
+        raise HTTPException(status_code=401, detail="Refresh token expired")
+    
+    # Get associated user
+    user = await prisma.user.find_unique(
+        where={'id': token_record.userId}
+    )
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    
+    # Generate new access token
+    new_access_token = create_access_token(
+        data={"sub": user.username, "user_id": user.id},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    )
+    
+    # Generate new refresh token (token rotation)
+    new_refresh_token, new_expires_at = create_refresh_token_with_expiry()
+    
+    # Delete old refresh token
+    await prisma.refreshtoken.delete(
+        where={'token': refresh_token}
+    )
+    
+    # Store new refresh token in database
+    await prisma.refreshtoken.create({
+        'token': new_refresh_token,
+        'userId': user.id,
+        'expiresAt': new_expires_at
+    })
+    
+    # Store new access token in-memory
+    active_access_tokens[new_access_token] = user.id
+    
+    # Set new refresh token in HTTP-only cookie
+    response.set_cookie(
+        key="refresh_token",
+        value=new_refresh_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
+    )
+    
     return {
-        "message": f"Hello {current_user}, you have access to this protected route"
+        "access_token": new_access_token,
+        "token_type": "bearer"
     }
 
 @app.post('/chat')
