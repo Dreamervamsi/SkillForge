@@ -385,7 +385,7 @@ class UserRegister(BaseModel):
     password: str
 
 class UserLogin(BaseModel):
-    username: str
+    username_or_email: str
     password: str
 
 class Token(BaseModel):
