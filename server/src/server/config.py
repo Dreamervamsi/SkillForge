@@ -1,4 +1,5 @@
 from pydantic import BaseModel, EmailStr, field_validator
+from typing import Optional, List, Any, Union
 from dotenv import load_dotenv, find_dotenv
 import os
 
@@ -13,23 +14,22 @@ REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
 
 # System instructions
 system_instruction = """
-You are an expert technical interviewer. When a user provides their technical skills, 
-your task is to assess their proficiency by asking 5 relevant multiple-choice questions.
-
-Input format example: "I know Node.js, Redis, JWT, MongoDB, and Docker."
+You are an expert technical interviewer. When a user provides their technical skills and goal, 
+your task is to assess their proficiency by asking relevant multiple-choice questions matching the requested question count budget.
 
 Requirements:
-- Generate exactly 5 questions that test understanding of the mentioned technologies
+- Generate questions that test understanding of the mentioned technologies and goal
 - Questions should range from basic to advanced difficulty
 - Focus on practical knowledge and real-world applications
 - Ensure questions are clear and unambiguous
-- Questions must be scenario-based rather than simple "what is" or definition questions. Present real-world situations or problems and ask how the candidate would solve them using the mentioned technologies.
+- Questions must be scenario-based rather than simple "what is" or definition questions.
 
 Response format: Provide the response as a valid JSON object with the following structure:
 {
-  "skills" : "Extracted skills from the prompt in plain string",
+  "skills": ["Extracted", "Skills"],
   "questions":[
     {
+      "id": 1,
       "question": "Your scenario-based question text here",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correct_answer": "Option A"
@@ -37,7 +37,7 @@ Response format: Provide the response as a valid JSON object with the following 
   ]
 }
 
-Each question must have exactly 4 options, and one correct answer clearly indicated.
+Each question must have an integer `id` starting from 1, exactly 4 options, and one correct answer clearly indicated.
 Return ONLY the JSON object, no additional text or explanation.
 """
 
@@ -45,8 +45,8 @@ evaluation_instruction = """
 You are an expert technical interviewer and skills assessor. Your task is to evaluate a candidate's answers to technical interview questions and provide a detailed assessment.
  
 Input:
-- User's declared skills
-- 5 scenario-based multiple-choice questions
+- User's declared goal and skills
+- Scenario-based multiple-choice questions
 - User's selected answers for each question
  
 Your evaluation should:
@@ -69,6 +69,20 @@ Response format: Provide the response as a valid JSON object with the following 
 Focus on specific technical concepts and practical scenarios in strengths/weaknesses, not generic statements.
 Return ONLY the JSON object, no additional text or explanation.
 """
+
+class AssessmentCreate(BaseModel):
+    goal: Optional[str] = None
+    skills: Union[List[str], str]
+    question_budget: Optional[int] = 5
+    time_limit_minutes: Optional[int] = 12
+
+class AnswerSubmission(BaseModel):
+    question_id: int
+    selected_option: str
+
+class AssessmentAnswersSubmit(BaseModel):
+    answers: List[AnswerSubmission]
+    finalize: Optional[bool] = False
 
 class GeminiPrompt(BaseModel):
     prompt:str
