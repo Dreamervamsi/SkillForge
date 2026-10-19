@@ -19,6 +19,7 @@ model User {
   email          String        @unique
   hashedPassword String
   refreshTokens  RefreshToken[]
+  assessments    Assessment[]
   createdAt      DateTime      @default(now())
   updatedAt      DateTime      @updatedAt
 }
@@ -30,4 +31,39 @@ model RefreshToken {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   createdAt DateTime @default(now())
+}
+
+enum AssessmentStatus {
+  CREATED
+  IN_PROGRESS
+  COMPLETED
+  EXPIRED
+}
+
+model Assessment {
+  id                  String           @id @default(uuid())
+  userId              Int
+  user                User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  goal                String?
+  selectedSkills      Json
+  questionBudget      Int              @default(5)
+  timeLimit           Int?             // in minutes
+  status              AssessmentStatus @default(CREATED)
+  questions           Json             // [{ id, question, options, correct_answer, difficulty, concepts }]
+  answers             Json             @default("[]") // [{ question_id, selected_option, evaluation_metadata }]
+  result              Json?            // evaluation result json
+  currentDifficulty   String?          // "beginner", "intermediate", "advanced", "expert"
+  questionPool        Json?            // Pool of candidate questions per difficulty
+  adaptivePath        Json?            // History of difficulty transitions and reasoning scores
+  nextQuestionIndex   Int              @default(0)
+  competencyEvidence  Json?            // Structured evidence per concept with rubric scores
+  rubricScores        Json?            // Rubric scores per question
+  conceptCoverage     Json?            // Which concepts were tested vs skills declared
+  skillGraph          Json?            // Skill dependency graph for the domain
+  startedAt           DateTime?
+  completedAt         DateTime?
+  createdAt           DateTime         @default(now())
+  updatedAt           DateTime         @updatedAt
+
+  @@index([userId])
 }
