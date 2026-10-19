@@ -1,10 +1,17 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr, field_validator
 from dotenv import load_dotenv, find_dotenv
 import os
 
 load_dotenv(find_dotenv())
 api_key = os.getenv("GEMINI_API_KEY")
 
+# JWT Configuration
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "30"))
+REFRESH_TOKEN_EXPIRE_DAYS = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
+
+# System instructions
 system_instruction = """
 You are an expert technical interviewer. When a user provides their technical skills, 
 your task is to assess their proficiency by asking 5 relevant multiple-choice questions.
@@ -74,3 +81,16 @@ class EvaluationRequest(BaseModel):
     skills: str
     questions: list[dict]
     answers: list[UserAnswer]
+
+class UserRegister(BaseModel):
+    username: str
+    email: str
+    password: str
+
+class UserLogin(BaseModel):
+    username: str
+    password: str
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
