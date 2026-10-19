@@ -6,14 +6,45 @@ from .dependencies import get_client, get_current_user
 from .config import (
     system_instruction,
     evaluation_instruction,
+    adaptive_question_instruction,
+    adaptive_answer_evaluation_instruction,
+    question_pool_generation_instruction,
+    skill_graph_generation_instruction,
+    personalized_exercise_generation_instruction,
     AssessmentCreate,
     AssessmentAnswersSubmit,
     UserRegister,
     UserLogin,
     Token,
+    QuestionGenerationRequest,
+    QuestionGenerationResponse,
+    AnswerEvaluation,
+    AdaptiveAnswerSubmission,
+    RubricDimensionScore,
+    ConceptEvidence,
+    QuestionRubricEvaluation,
+    CompetencyProfile,
+    AssessmentCoverage,
     ACCESS_TOKEN_EXPIRE_MINUTES,
     REFRESH_TOKEN_EXPIRE_DAYS,
 )
+from .adaptive_engine import (
+    DifficultyLevel,
+    determine_next_difficulty,
+    select_next_question,
+    select_next_question_from_all_pools,
+    should_end_assessment,
+    update_adaptive_path,
+    calculate_overall_confidence,
+    get_initial_difficulty,
+)
+from .competency import (
+    aggregate_concept_evidence,
+    calculate_assessment_coverage,
+    generate_competency_profile,
+)
+from .skill_graph import SkillGraph
+from .roadmap import RoadmapGenerator
 from .dependencies import check_rate_limit
 from .exceptions import GeminiException
 from .auth import get_password_hash, verify_password, create_access_token, create_refresh_token_with_expiry, active_access_tokens
@@ -245,35 +276,148 @@ async def create_assessment(
     skills_list = data.skills if isinstance(data.skills, list) else [s.strip() for s in data.skills.split(",") if s.strip()]
     skills_str = ", ".join(skills_list)
     budget = data.question_budget or 5
+    adaptive_mode = data.adaptive_mode or False
 
     try:
         client = get_client()
-        prompt_text = f"Goal: {data.goal or 'General Skill Assessment'}\nSkills: {skills_str}\nPlease generate exactly {budget} questions."
-        config = types.GenerateContentConfig(system_instruction=system_instruction)
 
-        res = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt_text,
-            config=config
-        )
-        ai_data = json.loads(res.text)
-        questions = ai_data.get("questions", [])
-        
-        # Ensure question IDs exist
-        for idx, q in enumerate(questions, start=1):
-            if "id" not in q:
-                q["id"] = idx
+        # Generate skill dependency graph for the domain
+        skill_graph = None
+        try:
+            domain = skills_str if len(skills_list) == 1 else f"{skills_list[0]} and related technologies"
+            prompt_text = f"Domain: {domain}\nGoal: {data.goal or 'General Skill Assessment'}\nPlease generate a skill dependency graph."
+            config = types.GenerateContentConfig(system_instruction=skill_graph_generation_instruction)
 
-        assessment = await prisma.assessment.create({
-            "userId": user.id,
-            "goal": data.goal,
-            "selectedSkills": json.dumps(skills_list),
-            "questionBudget": budget,
-            "timeLimit": data.time_limit_minutes,
-            "status": "CREATED",
-            "questions": json.dumps(questions),
-            "answers": json.dumps([]),
-        })
+            res = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt_text,
+                config=config
+            )
+            graph_data = json.loads(res.text)
+            skill_graph = SkillGraph.from_dict(graph_data)
+        except Exception as graph_error:
+            print("Error generating skill graph:", str(graph_error))
+            skill_graph = None
+
+        if adaptive_mode:
+            # Adaptive mode: Generate question pool (2-3 questions per difficulty level)
+            initial_difficulty = get_initial_difficulty(skills_list, data.goal)
+            questions_per_difficulty = min(3, max(2, budget // 4))  # 2-3 questions per difficulty
+
+            try:
+                prompt_text = f"Goal: {data.goal or 'General Skill Assessment'}\nSkills: {skills_str}\nPlease generate {questions_per_difficulty} questions for EACH difficulty level (beginner, intermediate, advanced, expert)."
+                config = types.GenerateContentConfig(system_instruction=question_pool_generation_instruction)
+
+                res = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt_text,
+                    config=config
+                )
+                ai_data = json.loads(res.text)
+                question_pool = ai_data.get("question_pool", {})
+            except Exception as pool_error:
+                print("Error generating question pool, falling back to single question:", str(pool_error))
+                question_pool = {}
+
+            # Start with first beginner question
+            beginner_questions = question_pool.get("beginner", [])
+            if beginner_questions:
+                first_question = beginner_questions[0]
+                questions = [first_question]
+            else:
+                # Fallback: generate single question if pool generation fails
+                try:
+                    prompt_text = f"Goal: {data.goal or 'General Skill Assessment'}\nSkills: {skills_str}\nDifficulty: {initial_difficulty}\nPlease generate exactly 1 question."
+                    config = types.GenerateContentConfig(system_instruction=adaptive_question_instruction)
+                    res = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=prompt_text,
+                        config=config
+                    )
+                    ai_data = json.loads(res.text)
+                    questions = [ai_data.get("question", {})]
+                    question_pool = {}
+                except Exception as single_error:
+                    print("Error generating single question:", str(single_error))
+                    raise HTTPException(status_code=500, detail="Failed to generate initial question")
+
+            # Ensure question IDs exist
+            for idx, q in enumerate(questions, start=1):
+                if "id" not in q:
+                    q["id"] = idx
+
+            # Reassign IDs in pool to be unique
+            next_id = 2
+            for difficulty in question_pool:
+                for q in question_pool[difficulty]:
+                    if "id" not in q or q["id"] < next_id:
+                        q["id"] = next_id
+                        next_id += 1
+
+            # Validate question pool structure
+            if not question_pool or not any(question_pool.values()):
+                # Fallback: if pool is empty, generate single question
+                try:
+                    prompt_text = f"Goal: {data.goal or 'General Skill Assessment'}\nSkills: {skills_str}\nDifficulty: {initial_difficulty}\nPlease generate exactly 1 question."
+                    config = types.GenerateContentConfig(system_instruction=adaptive_question_instruction)
+                    res = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=prompt_text,
+                        config=config
+                    )
+                    ai_data = json.loads(res.text)
+                    questions = [ai_data.get("question", {})]
+                    question_pool = {}
+                    next_id = 2
+                except Exception as validation_error:
+                    print("Error generating fallback question:", str(validation_error))
+                    # Use the already generated questions if pool validation fails
+                    pass
+
+            assessment = await prisma.assessment.create({
+                "userId": user.id,
+                "goal": data.goal,
+                "selectedSkills": json.dumps(skills_list),
+                "questionBudget": budget,
+                "timeLimit": data.time_limit_minutes,
+                "status": "CREATED",
+                "questions": json.dumps(questions),
+                "answers": json.dumps([]),
+                "currentDifficulty": initial_difficulty,
+                "questionPool": json.dumps(question_pool),
+                "adaptivePath": json.dumps([]),
+                "nextQuestionIndex": 1,
+                "skillGraph": json.dumps(skill_graph.to_dict()) if skill_graph else None,
+            })
+        else:
+            # Non-adaptive mode: Generate all questions at once (original behavior)
+            prompt_text = f"Goal: {data.goal or 'General Skill Assessment'}\nSkills: {skills_str}\nPlease generate exactly {budget} questions."
+            config = types.GenerateContentConfig(system_instruction=system_instruction)
+
+            res = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt_text,
+                config=config
+            )
+            ai_data = json.loads(res.text)
+            questions = ai_data.get("questions", [])
+
+            # Ensure question IDs exist
+            for idx, q in enumerate(questions, start=1):
+                if "id" not in q:
+                    q["id"] = idx
+
+            assessment = await prisma.assessment.create({
+                "userId": user.id,
+                "goal": data.goal,
+                "selectedSkills": json.dumps(skills_list),
+                "questionBudget": budget,
+                "timeLimit": data.time_limit_minutes,
+                "status": "CREATED",
+                "questions": json.dumps(questions),
+                "answers": json.dumps([]),
+                "skillGraph": json.dumps(skill_graph.to_dict()) if skill_graph else None,
+            })
 
         return {
             "id": assessment.id,
@@ -282,6 +426,8 @@ async def create_assessment(
             "question_budget": assessment.questionBudget,
             "time_limit_minutes": assessment.timeLimit,
             "status": assessment.status,
+            "adaptive_mode": adaptive_mode,
+            "current_difficulty": assessment.currentDifficulty if adaptive_mode else None,
             "questions": _sanitize_questions_for_client(questions),
             "created_at": assessment.createdAt
         }
@@ -323,7 +469,7 @@ async def get_assessment(
             )
             assessment.status = "EXPIRED"
 
-    return {
+    response = {
         "id": assessment.id,
         "goal": assessment.goal,
         "selected_skills": skills,
@@ -336,6 +482,485 @@ async def get_assessment(
         "started_at": assessment.startedAt,
         "created_at": assessment.createdAt
     }
+
+    # Add adaptive-specific information if it's an adaptive assessment
+    if assessment.currentDifficulty:
+        response["adaptive_mode"] = True
+        response["current_difficulty"] = assessment.currentDifficulty
+        response["next_question_index"] = assessment.nextQuestionIndex
+        adaptive_path = json.loads(assessment.adaptivePath) if assessment.adaptivePath else []
+        response["adaptive_path"] = adaptive_path
+    else:
+        response["adaptive_mode"] = False
+
+    return response
+
+@app.post('/assessments/{assessment_id}/roadmap')
+async def generate_roadmap(
+    assessment_id: str,
+    goal_name: str,
+    _=Depends(check_rate_limit),
+    current_username: str = Depends(get_current_user)
+):
+    """
+    Generate a personalized learning roadmap based on assessment results.
+    Compares competency profile with goal requirements and creates ordered learning path.
+    """
+    prisma = await get_prisma()
+    user = await prisma.user.find_unique(where={"username": current_username})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    assessment = await prisma.assessment.find_unique(where={"id": assessment_id})
+    if not assessment or assessment.userId != user.id:
+        raise HTTPException(status_code=404, detail="Assessment session not found")
+
+    if assessment.status != "COMPLETED":
+        raise HTTPException(status_code=400, detail="Assessment must be completed before generating roadmap")
+
+    # Load skill graph
+    skill_graph = None
+    if assessment.skillGraph:
+        try:
+            graph_data = json.loads(assessment.skillGraph) if isinstance(assessment.skillGraph, str) else assessment.skillGraph
+            skill_graph = SkillGraph.from_dict(graph_data)
+        except Exception as e:
+            print("Error loading skill graph:", str(e))
+    
+    if not skill_graph:
+        raise HTTPException(status_code=400, detail="Skill graph not available for this assessment")
+
+    # Load competency profile
+    competency_profile = None
+    if assessment.competencyEvidence:
+        try:
+            competency_data = json.loads(assessment.competencyEvidence) if isinstance(assessment.competencyEvidence, str) else assessment.competencyEvidence
+            competency_profile = competency_data
+        except Exception as e:
+            print("Error loading competency profile:", str(e))
+    
+    if not competency_profile:
+        raise HTTPException(status_code=400, detail="Competency profile not available")
+
+    # Generate roadmap
+    roadmap_generator = RoadmapGenerator(skill_graph)
+    roadmap = roadmap_generator.generate_roadmap(competency_profile, goal_name)
+
+    # Generate personalized exercises for each step
+    try:
+        client = get_client()
+        exercises = {}
+
+        for step in roadmap.steps:
+            # Get current mastery level for this skill
+            current_mastery = "none"
+            for gap in roadmap.skill_gaps:
+                if gap.skill_name == step.skill_name:
+                    current_mastery = gap.current_mastery
+                    break
+
+            # Get skill node details
+            skill_node = skill_graph.skills.get(step.skill_name)
+            if not skill_node:
+                continue
+
+            # Generate personalized exercises
+            prompt_text = f"Skill: {step.skill_name}\n"
+            prompt_text += f"Concepts: {', '.join(step.concepts)}\n"
+            prompt_text += f"Current mastery: {current_mastery}\n"
+            prompt_text += f"Prerequisites: {', '.join(skill_node.prerequisites)}\n"
+            prompt_text += "Please generate personalized exercises."
+
+            config = types.GenerateContentConfig(system_instruction=personalized_exercise_generation_instruction)
+            res = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt_text,
+                config=config
+            )
+            exercise_data = json.loads(res.text)
+            exercises[step.skill_name] = exercise_data
+
+        # Update roadmap with exercises
+        for step in roadmap.steps:
+            if step.skill_name in exercises:
+                step.exercise = exercises[step.skill_name]
+
+    except Exception as e:
+        print("Error generating exercises:", str(e))
+        # Return roadmap without exercises if generation fails
+
+    return roadmap.to_dict()
+
+@app.post('/assessments/{assessment_id}/next-question')
+async def get_next_question(
+    assessment_id: str,
+    previous_answer: Optional[AdaptiveAnswerSubmission] = None,
+    _=Depends(check_rate_limit),
+    current_username: str = Depends(get_current_user)
+):
+    """
+    Get the next question in an adaptive assessment.
+    Evaluates the previous answer (if provided) and generates the next question.
+    """
+    prisma = await get_prisma()
+    user = await prisma.user.find_unique(where={"username": current_username})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    assessment = await prisma.assessment.find_unique(where={"id": assessment_id})
+    if not assessment or assessment.userId != user.id:
+        raise HTTPException(status_code=404, detail="Assessment session not found")
+
+    if assessment.status in ["COMPLETED", "EXPIRED"]:
+        raise HTTPException(status_code=400, detail=f"Cannot get next question for assessment with status {assessment.status}")
+
+    # Check if this is an adaptive assessment
+    if not assessment.currentDifficulty:
+        raise HTTPException(status_code=400, detail="This endpoint is only for adaptive assessments")
+
+    questions = json.loads(assessment.questions) if isinstance(assessment.questions, str) else assessment.questions
+    answers = json.loads(assessment.answers) if isinstance(assessment.answers, str) else assessment.answers
+    adaptive_path = json.loads(assessment.adaptivePath) if assessment.adaptivePath else []
+    skills = json.loads(assessment.selectedSkills) if isinstance(assessment.selectedSkills, str) else assessment.selectedSkills
+    question_pool = json.loads(assessment.questionPool) if assessment.questionPool else {}
+
+    current_difficulty = assessment.currentDifficulty
+    next_question_index = assessment.nextQuestionIndex
+
+    # Track used question IDs
+    used_question_ids = {q["id"] for q in questions}
+
+    # Evaluate previous answer if provided
+    if previous_answer:
+        try:
+            client = get_client()
+            q_map = {q["id"]: q for q in questions}
+            q_obj = q_map.get(previous_answer.question_id)
+
+            if not q_obj:
+                raise HTTPException(status_code=404, detail="Question not found")
+
+            is_correct = (previous_answer.selected_option == q_obj.get("correct_answer"))
+
+            # Store the answer
+            answers.append({
+                "question_id": previous_answer.question_id,
+                "selected_option": previous_answer.selected_option
+            })
+
+            # Use AI to evaluate the answer
+            input_text = f"Goal: {assessment.goal or 'Assessment'}\nSkills: {', '.join(skills)}\n"
+            input_text += f"Question: {q_obj.get('question', '')}\n"
+            input_text += f"Options: {q_obj.get('options', [])}\n"
+            input_text += f"User selected: {previous_answer.selected_option}\n"
+            input_text += f"Correct answer: {q_obj.get('correct_answer', 'N/A')}\n"
+            input_text += f"Difficulty: {q_obj.get('difficulty', 'unknown')}\n"
+            input_text += f"Concepts tested: {q_obj.get('concepts_tested', [])}\n"
+
+            config = types.GenerateContentConfig(system_instruction=adaptive_answer_evaluation_instruction)
+            res = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=input_text,
+                config=config
+            )
+            eval_result = json.loads(res.text)
+
+            # Store rubric evaluation
+            rubric_scores = json.loads(assessment.rubricScores) if assessment.rubricScores else []
+            rubric_evaluation = {
+                "question_id": previous_answer.question_id,
+                "concept": q_obj.get("concepts_tested", ["general"])[0] if q_obj.get("concepts_tested") else "general",
+                "rubric_scores": eval_result.get("rubric_scores", []),
+                "overall_score": eval_result.get("overall_rubric_score", 0),
+                "is_correct": eval_result.get("is_correct", is_correct),
+                "reasoning_quality": eval_result.get("reasoning_quality", 0.5),
+                "identified_gaps": eval_result.get("identified_gaps", []),
+                "feedback": eval_result.get("feedback", ""),
+                "strengths": eval_result.get("strengths", []),
+                "weaknesses": eval_result.get("weaknesses", [])
+            }
+            rubric_scores.append(rubric_evaluation)
+
+            # Update adaptive path with rubric information
+            adaptive_path = update_adaptive_path(
+                adaptive_path,
+                previous_answer.question_id,
+                q_obj.get("difficulty", current_difficulty),
+                eval_result.get("is_correct", is_correct),
+                eval_result.get("reasoning_quality", 0.5),
+                eval_result.get("identified_gaps", [])
+            )
+
+            # Determine next difficulty using rubric scores if available
+            overall_rubric = eval_result.get("overall_rubric_score", 0)
+            if overall_rubric >= 3.0 and eval_result.get("reasoning_quality", 0) >= 0.7:
+                # Strong performance, increase difficulty
+                next_difficulty = DifficultyLevel.get_next_higher(current_difficulty)
+            elif overall_rubric < 2.0:
+                # Weak performance, decrease difficulty
+                next_difficulty = DifficultyLevel.get_next_lower(current_difficulty)
+            else:
+                # Maintain current difficulty
+                next_difficulty = determine_next_difficulty(
+                    current_difficulty,
+                    eval_result.get("is_correct", is_correct),
+                    eval_result.get("reasoning_quality", 0.5),
+                    eval_result.get("identified_gaps", [])
+                )
+            current_difficulty = next_difficulty
+
+            # Check if assessment should end
+            should_end, end_reason = should_end_assessment(
+                len(answers),
+                assessment.questionBudget,
+                adaptive_path,
+                current_difficulty
+            )
+
+            if should_end:
+                # Generate competency evidence and coverage
+                competency_evidence = aggregate_concept_evidence(rubric_scores, questions)
+                competency_profile = generate_competency_profile(competency_evidence, adaptive_path)
+                coverage = calculate_assessment_coverage(skills, questions)
+
+                # Update assessment to completed
+                await prisma.assessment.update(
+                    where={"id": assessment_id},
+                    data={
+                        "status": "COMPLETED",
+                        "completedAt": datetime.now(timezone.utc),
+                        "adaptivePath": json.dumps(adaptive_path),
+                        "currentDifficulty": current_difficulty,
+                        "answers": json.dumps(answers),
+                        "rubricScores": json.dumps(rubric_scores),
+                        "competencyEvidence": json.dumps(competency_evidence),
+                        "conceptCoverage": json.dumps(coverage),
+                    }
+                )
+                return {
+                    "assessment_ended": True,
+                    "reason": end_reason,
+                    "final_difficulty": current_difficulty,
+                    "adaptive_path": adaptive_path,
+                    "competency_profile": competency_profile
+                }
+
+            # Update assessment with new state
+            await prisma.assessment.update(
+                where={"id": assessment_id},
+                data={
+                    "adaptivePath": json.dumps(adaptive_path),
+                    "currentDifficulty": current_difficulty,
+                    "answers": json.dumps(answers),
+                    "rubricScores": json.dumps(rubric_scores),
+                }
+            )
+
+        except Exception as e:
+            print("Error evaluating answer:", str(e))
+            # Continue with simple evaluation if AI fails
+            q_map = {q["id"]: q for q in questions}
+            q_obj = q_map.get(previous_answer.question_id)
+            is_correct = (previous_answer.selected_option == q_obj.get("correct_answer")) if q_obj else False
+            answers.append({
+                "question_id": previous_answer.question_id,
+                "selected_option": previous_answer.selected_option
+            })
+
+            # Create minimal rubric evaluation
+            rubric_scores = json.loads(assessment.rubricScores) if assessment.rubricScores else []
+            rubric_evaluation = {
+                "question_id": previous_answer.question_id,
+                "concept": q_obj.get("concepts_tested", ["general"])[0] if q_obj.get("concepts_tested") else "general",
+                "rubric_scores": [],
+                "overall_score": 2.0 if is_correct else 0.0,
+                "is_correct": is_correct,
+                "reasoning_quality": 0.5 if is_correct else 0.0,
+                "identified_gaps": [],
+                "feedback": "AI evaluation failed, using simple correctness check",
+                "strengths": [],
+                "weaknesses": []
+            }
+            rubric_scores.append(rubric_evaluation)
+
+            adaptive_path = update_adaptive_path(
+                adaptive_path,
+                previous_answer.question_id,
+                current_difficulty,
+                is_correct,
+                0.5 if is_correct else 0.0,
+                []
+            )
+
+    # Check if we've reached the question budget
+    if next_question_index > assessment.questionBudget:
+        # Generate competency evidence if rubric scores exist
+        rubric_scores = json.loads(assessment.rubricScores) if assessment.rubricScores else []
+        competency_evidence = None
+        competency_profile = None
+        coverage = None
+
+        if rubric_scores:
+            competency_evidence = aggregate_concept_evidence(rubric_scores, questions)
+            competency_profile = generate_competency_profile(competency_evidence, adaptive_path)
+            coverage = calculate_assessment_coverage(skills, questions)
+
+        await prisma.assessment.update(
+            where={"id": assessment_id},
+            data={
+                "status": "COMPLETED",
+                "completedAt": datetime.now(timezone.utc),
+                "adaptivePath": json.dumps(adaptive_path),
+                "answers": json.dumps(answers),
+                "rubricScores": json.dumps(rubric_scores),
+                "competencyEvidence": json.dumps(competency_evidence) if competency_evidence else None,
+                "conceptCoverage": json.dumps(coverage) if coverage else None,
+            }
+        )
+        return {
+            "assessment_ended": True,
+            "reason": "Reached question budget",
+            "adaptive_path": adaptive_path,
+            "competency_profile": competency_profile
+        }
+
+    # Generate next question
+    try:
+        new_question = None
+
+        # First, try to select from question pool
+        question_from_pool, needs_generation = select_next_question(
+            question_pool,
+            current_difficulty,
+            used_question_ids,
+            skills,
+            assessment.goal,
+            None
+        )
+
+        if question_from_pool and not needs_generation:
+            # Use question from pool
+            new_question = question_from_pool
+            used_question_ids.add(new_question["id"])
+        else:
+            # Try to find from any difficulty pool
+            fallback_question = select_next_question_from_all_pools(
+                question_pool,
+                current_difficulty,
+                used_question_ids
+            )
+
+            if fallback_question:
+                new_question = fallback_question
+                used_question_ids.add(new_question["id"])
+            else:
+                # Pool exhausted, generate new question
+                try:
+                    client = get_client()
+                    prompt_text = f"Goal: {assessment.goal or 'General Skill Assessment'}\nSkills: {', '.join(skills)}\nDifficulty: {current_difficulty}\nPlease generate exactly 1 question."
+                    config = types.GenerateContentConfig(system_instruction=adaptive_question_instruction)
+
+                    res = client.models.generate_content(
+                        model='gemini-2.5-flash',
+                        contents=prompt_text,
+                        config=config
+                    )
+                    ai_data = json.loads(res.text)
+                    new_question = ai_data.get("question", {})
+
+                    # Assign new question ID
+                    new_question["id"] = next_question_index
+                except Exception as generation_error:
+                    print("Error generating fallback question:", str(generation_error))
+                    # If generation fails, end the assessment
+                    await prisma.assessment.update(
+                        where={"id": assessment_id},
+                        data={
+                            "status": "COMPLETED",
+                            "completedAt": datetime.now(timezone.utc),
+                            "adaptivePath": json.dumps(adaptive_path),
+                            "answers": json.dumps(answers),
+                        }
+                    )
+                    return {
+                        "assessment_ended": True,
+                        "reason": "Question pool exhausted and generation failed",
+                        "adaptive_path": adaptive_path
+                    }
+
+        if not new_question:
+            # No question available, end assessment
+            await prisma.assessment.update(
+                where={"id": assessment_id},
+                data={
+                    "status": "COMPLETED",
+                    "completedAt": datetime.now(timezone.utc),
+                    "adaptivePath": json.dumps(adaptive_path),
+                    "answers": json.dumps(answers),
+                }
+            )
+            return {
+                "assessment_ended": True,
+                "reason": "No questions available",
+                "adaptive_path": adaptive_path
+            }
+
+        # Add to questions list
+        questions.append(new_question)
+
+        # Update assessment
+        updated_assessment = await prisma.assessment.update(
+            where={"id": assessment_id},
+            data={
+                "questions": json.dumps(questions),
+                "nextQuestionIndex": next_question_index + 1,
+                "adaptivePath": json.dumps(adaptive_path),
+                "currentDifficulty": current_difficulty,
+                "status": "IN_PROGRESS",
+                "startedAt": assessment.startedAt or datetime.now(timezone.utc),
+            }
+        )
+
+        return {
+            "question": _sanitize_questions_for_client([new_question])[0],
+            "difficulty": current_difficulty,
+            "question_index": next_question_index,
+            "assessment_ended": False
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("Error generating next question:", str(e))
+        # End assessment gracefully on error
+        rubric_scores = json.loads(assessment.rubricScores) if assessment.rubricScores else []
+        competency_evidence = None
+        competency_profile = None
+        coverage = None
+
+        if rubric_scores:
+            competency_evidence = aggregate_concept_evidence(rubric_scores, questions)
+            competency_profile = generate_competency_profile(competency_evidence, adaptive_path)
+            coverage = calculate_assessment_coverage(skills, questions)
+
+        await prisma.assessment.update(
+            where={"id": assessment_id},
+            data={
+                "status": "COMPLETED",
+                "completedAt": datetime.now(timezone.utc),
+                "adaptivePath": json.dumps(adaptive_path),
+                "answers": json.dumps(answers),
+                "rubricScores": json.dumps(rubric_scores),
+                "competencyEvidence": json.dumps(competency_evidence) if competency_evidence else None,
+                "conceptCoverage": json.dumps(coverage) if coverage else None,
+            }
+        )
+        return {
+            "assessment_ended": True,
+            "reason": "Error generating next question",
+            "adaptive_path": adaptive_path,
+            "competency_profile": competency_profile
+        }
 
 @app.post('/assessments/{assessment_id}/answers')
 async def submit_answers(
@@ -356,6 +981,13 @@ async def submit_answers(
     if assessment.status in ["COMPLETED", "EXPIRED"]:
         raise HTTPException(status_code=400, detail=f"Cannot update answers for an assessment with status {assessment.status}")
 
+    # For adaptive assessments, answers should be submitted via /next-question endpoint
+    if assessment.currentDifficulty:
+        raise HTTPException(
+            status_code=400,
+            detail="For adaptive assessments, please use the /assessments/{id}/next-question endpoint to submit answers and get the next question"
+        )
+
     now = datetime.now(timezone.utc)
     started_at = assessment.startedAt or now
     questions = json.loads(assessment.questions) if isinstance(assessment.questions, str) else assessment.questions
@@ -372,14 +1004,52 @@ async def submit_answers(
     new_status = "COMPLETED" if should_finalize else "IN_PROGRESS"
 
     eval_result = None
+    rubric_scores_list = []
     if should_finalize:
-        # Run evaluation via Gemini
+        # Run evaluation via Gemini for each answer to get rubric scores
         try:
             client = get_client()
             skills_val = json.loads(assessment.selectedSkills) if isinstance(assessment.selectedSkills, str) else assessment.selectedSkills
             skills_str = ", ".join(skills_val) if isinstance(skills_val, list) else str(skills_val)
 
             q_map = {q["id"]: q for q in questions}
+
+            # Evaluate each answer individually for rubric scoring
+            for ans in updated_answers:
+                q_obj = q_map.get(ans["question_id"], {})
+                is_correct = (ans["selected_option"] == q_obj.get("correct_answer"))
+
+                input_text = f"Goal: {assessment.goal or 'Assessment'}\nSkills: {skills_str}\n"
+                input_text += f"Question: {q_obj.get('question', '')}\n"
+                input_text += f"Options: {q_obj.get('options', [])}\n"
+                input_text += f"User selected: {ans['selected_option']}\n"
+                input_text += f"Correct answer: {q_obj.get('correct_answer', 'N/A')}\n"
+                input_text += f"Difficulty: {q_obj.get('difficulty', 'unknown')}\n"
+                input_text += f"Concepts tested: {q_obj.get('concepts_tested', [])}\n"
+
+                config = types.GenerateContentConfig(system_instruction=adaptive_answer_evaluation_instruction)
+                res = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=input_text,
+                    config=config
+                )
+                rubric_eval = json.loads(res.text)
+
+                rubric_evaluation = {
+                    "question_id": ans["question_id"],
+                    "concept": q_obj.get("concepts_tested", ["general"])[0] if q_obj.get("concepts_tested") else "general",
+                    "rubric_scores": rubric_eval.get("rubric_scores", []),
+                    "overall_score": rubric_eval.get("overall_rubric_score", 0),
+                    "is_correct": rubric_eval.get("is_correct", is_correct),
+                    "reasoning_quality": rubric_eval.get("reasoning_quality", 0.5),
+                    "identified_gaps": rubric_eval.get("identified_gaps", []),
+                    "feedback": rubric_eval.get("feedback", ""),
+                    "strengths": rubric_eval.get("strengths", []),
+                    "weaknesses": rubric_eval.get("weaknesses", [])
+                }
+                rubric_scores_list.append(rubric_evaluation)
+
+            # Generate overall evaluation
             input_text = f"Goal: {assessment.goal or 'Assessment'}\nSkills: {skills_str}\nQuestions and Answers:\n"
             for ans in updated_answers:
                 q_obj = q_map.get(ans["question_id"], {})
@@ -392,9 +1062,18 @@ async def submit_answers(
                 config=config
             )
             eval_result = json.loads(res.text)
+
+            # Generate competency evidence
+            competency_evidence = aggregate_concept_evidence(rubric_scores_list, questions)
+            competency_profile = generate_competency_profile(competency_evidence, [])
+            coverage = calculate_assessment_coverage(skills_val, questions)
+
         except Exception as e:
             print("Error evaluating assessment:", str(e))
             eval_result = {"error": "Evaluation could not be generated"}
+            competency_evidence = None
+            competency_profile = None
+            coverage = None
 
     updated_assessment = await prisma.assessment.update(
         where={"id": assessment_id},
@@ -403,7 +1082,10 @@ async def submit_answers(
             "status": new_status,
             "startedAt": started_at,
             "completedAt": now if should_finalize else None,
-            "result": json.dumps(eval_result) if eval_result else assessment.result
+            "result": json.dumps(eval_result) if eval_result else assessment.result,
+            "rubricScores": json.dumps(rubric_scores_list) if rubric_scores_list else None,
+            "competencyEvidence": json.dumps(competency_evidence) if competency_evidence else None,
+            "conceptCoverage": json.dumps(coverage) if coverage else None,
         }
     )
 
@@ -439,9 +1121,14 @@ async def get_assessment_results(
     questions = json.loads(assessment.questions) if isinstance(assessment.questions, str) else assessment.questions
     answers = json.loads(assessment.answers) if isinstance(assessment.answers, str) else assessment.answers
     eval_result = json.loads(assessment.result) if isinstance(assessment.result, str) else assessment.result
+    adaptive_path = json.loads(assessment.adaptivePath) if assessment.adaptivePath else []
+    rubric_scores = json.loads(assessment.rubricScores) if assessment.rubricScores else []
+    competency_evidence = json.loads(assessment.competencyEvidence) if assessment.competencyEvidence else None
+    concept_coverage = json.loads(assessment.conceptCoverage) if assessment.conceptCoverage else None
 
     # Score calculation
     q_map = {q["id"]: q for q in questions}
+    rubric_map = {rs["question_id"]: rs for rs in rubric_scores} if rubric_scores else {}
     correct_count = 0
     detailed_results = []
     for ans in answers:
@@ -449,18 +1136,25 @@ async def get_assessment_results(
         is_correct = (ans["selected_option"] == q_obj.get("correct_answer"))
         if is_correct:
             correct_count += 1
+
+        # Include rubric evaluation if available
+        rubric_eval = rubric_map.get(ans["question_id"], {})
+
         detailed_results.append({
             "question_id": ans["question_id"],
             "question": q_obj.get("question"),
             "user_selected": ans["selected_option"],
             "correct_answer": q_obj.get("correct_answer"),
-            "is_correct": is_correct
+            "is_correct": is_correct,
+            "difficulty": q_obj.get("difficulty"),
+            "concepts_tested": q_obj.get("concepts_tested"),
+            "rubric_evaluation": rubric_eval if rubric_eval else None
         })
 
     total = len(questions)
     score_pct = round((correct_count / total * 100), 2) if total > 0 else 0.0
 
-    return {
+    result = {
         "id": assessment.id,
         "status": assessment.status,
         "score": {
@@ -472,3 +1166,27 @@ async def get_assessment_results(
         "evaluation": eval_result,
         "completed_at": assessment.completedAt
     }
+
+    # Add adaptive-specific information if it's an adaptive assessment
+    if assessment.currentDifficulty:
+        result["adaptive_mode"] = True
+        result["final_difficulty"] = assessment.currentDifficulty
+        result["adaptive_path"] = adaptive_path
+        result["overall_confidence"] = calculate_overall_confidence(adaptive_path)
+
+        # Add competency evidence if available
+        if competency_evidence:
+            result["competency_evidence"] = competency_evidence
+
+        # Add concept coverage if available
+        if concept_coverage:
+            result["concept_coverage"] = concept_coverage
+
+        # Generate competency profile if not already stored
+        if competency_evidence and not result.get("competency_profile"):
+            competency_profile = generate_competency_profile(competency_evidence, adaptive_path)
+            result["competency_profile"] = competency_profile
+    else:
+        result["adaptive_mode"] = False
+
+    return result
