@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, Response, Request, status
+from fastapi.middleware.cors import CORSMiddleware
 from google.genai import types
 from .dependencies import get_client, get_current_user
 from .config import (
@@ -51,6 +52,15 @@ from .auth import get_password_hash, verify_password, create_access_token, creat
 from .database import get_prisma
 
 app = FastAPI()
+
+# Enable CORS for frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.get('/')
 def home():
@@ -109,7 +119,7 @@ async def register(user: UserRegister, response: Response):
             key="refresh_token",
             value=refresh_token,
             httponly=True,
-            secure=True,
+            secure=False,
             samesite="lax",
             max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
         )
@@ -130,10 +140,13 @@ async def register(user: UserRegister, response: Response):
 @app.post('/login')
 async def login(user: UserLogin, response: Response):
     prisma = await get_prisma()
-        
+
     existing_user = await prisma.user.find_first(
         where={
-            'email': user.email
+            'OR': [
+                {'username': user.username_or_email},
+                {'email': user.username_or_email}
+            ]
         }
     )
     if existing_user is None:
@@ -169,7 +182,7 @@ async def login(user: UserLogin, response: Response):
         key="refresh_token",
         value=refresh_token,
         httponly=True,
-        secure=True,
+        secure=False,
         samesite="lax",
         max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
     )
@@ -242,7 +255,7 @@ async def refresh(request: Request, response: Response):
         key="refresh_token",
         value=new_refresh_token,
         httponly=True,
-        secure=True,
+        secure=False,
         samesite="lax",
         max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
     )
