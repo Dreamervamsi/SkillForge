@@ -9,14 +9,20 @@ from .auth import verify_token
 rate_limiter = RateLimiter(capacity=10, refill_rate=2)
 security = HTTPBearer()
 
+client = None
 try:
-    if api_key:
+    if api_key and api_key != "your_gemini_api_key_here":
         client = Client(api_key=api_key)
+        print("Gemini client initialized successfully")
     else:
-        print("Api key is missing")
-        raise GeminiException("Api key is missing")
+        print("WARNING: Gemini API key is missing or not configured. AI features will not work.")
 except Exception as e:
-    raise GeminiException(str(e))
+    print(f"WARNING: Failed to initialize Gemini client: {str(e)}. AI features will not work.")
+
+def get_client():
+    if client is None:
+        raise GeminiException("Gemini client is not initialized. Please add your API key to the .env file.")
+    return client
 
 def get_client():
     return client

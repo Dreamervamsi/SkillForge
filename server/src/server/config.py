@@ -1,5 +1,5 @@
 from pydantic import BaseModel, EmailStr, field_validator
-from typing import Optional, List, Any, Union
+from typing import Optional, List, Any, Union, Dict
 from dotenv import load_dotenv, find_dotenv
 import os
 
@@ -384,9 +384,23 @@ class UserRegister(BaseModel):
     email: str
     password: str
 
+    @field_validator('password')
+    @classmethod
+    def validate_password_length(cls, v: str) -> str:
+        if len(v.encode('utf-8')) > 72:
+            raise ValueError('Password must be 72 characters or less (bcrypt limitation)')
+        return v
+
 class UserLogin(BaseModel):
     username_or_email: str
     password: str
+
+    @field_validator('password')
+    @classmethod
+    def validate_password_length(cls, v: str) -> str:
+        if len(v.encode('utf-8')) > 72:
+            raise ValueError('Password must be 72 characters or less (bcrypt limitation)')
+        return v
 
 class Token(BaseModel):
     access_token: str

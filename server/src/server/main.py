@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends, HTTPException, Response, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -56,7 +57,12 @@ app = FastAPI()
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -68,11 +74,39 @@ def home():
         "status" :" success"
     }
 
+@app.get('/me')
+async def get_me(current_username: str = Depends(get_current_user)):
+    prisma = await get_prisma()
+    user = await prisma.user.find_unique(
+        where={"username": current_username},
+        include={"assessments": True}
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    assessments_summary = []
+    for a in user.assessments:
+        assessments_summary.append({
+            "id": a.id,
+            "goal": a.goal,
+            "status": a.status,
+            "createdAt": a.createdAt.isoformat() if a.createdAt else None,
+            "result": a.result,
+        })
+        
+    return {
+        "username": user.username,
+        "email": user.email,
+        "assessments": assessments_summary,
+        "assessmentCount": len(user.assessments)
+    }
+
 @app.post('/register')
 async def register(user: UserRegister, response: Response):
     try:
+        print(f"DEBUG: Register attempt - username: {user.username}, email: {user.email}")
         prisma = await get_prisma()
-        
+
         # Check if user already exists
         existing_user = await prisma.user.find_first(
             where={
@@ -83,62 +117,92 @@ async def register(user: UserRegister, response: Response):
             }
         )
         if existing_user:
+            print(f"DEBUG: User already exists - {existing_user.username}")
             raise HTTPException(status_code=400, detail="User already exists")
-        
+
+        # Validate password length (bcrypt has 72-byte limit)
+        if len(user.password.encode('utf-8')) > 72:
+            raise HTTPException(
+                status_code=400,
+                detail="Password is too long. Maximum length is 72 characters. Please use a shorter password."
+            )
+
         # Hash the password
+        print("DEBUG: Hashing password...")
         hashed_password = get_password_hash(user.password)
-        
+        print("DEBUG: Password hashed successfully")
+
         # Create user in database
+        print("DEBUG: Creating user in database...")
         new_user = await prisma.user.create({
             'username': user.username,
             'email': user.email,
             'hashedPassword': hashed_password
         })
-        
+        print(f"DEBUG: User created with ID: {new_user.id}")
+
         # Generate access token
+        print("DEBUG: Generating access token...")
         access_token = create_access_token(
             data={"sub": new_user.username, "user_id": new_user.id},
             expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
         )
-        
+        print("DEBUG: Access token generated")
+
         # Generate refresh token
+        print("DEBUG: Generating refresh token...")
         refresh_token, expires_at = create_refresh_token_with_expiry()
-        
+        print("DEBUG: Refresh token generated")
+
         # refresh token in database
+        print("DEBUG: Storing refresh token in database...")
         await prisma.refreshtoken.create({
             'token': refresh_token,
             'userId': new_user.id,
             'expiresAt': expires_at
         })
-        
+        print("DEBUG: Refresh token stored")
+
         # access token in-memory
         active_access_tokens[access_token] = new_user.id
-        
+
         # refresh token in HTTP-only cookie
+        print("DEBUG: Setting cookie...")
         response.set_cookie(
             key="refresh_token",
             value=refresh_token,
             httponly=True,
             secure=False,
             samesite="lax",
+            path="/",
             max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
         )
-        
+        print("DEBUG: Cookie set")
+
+        print("DEBUG: Registration successful")
         return {
             "access_token": access_token,
             "token_type": "bearer",
             "username": new_user.username,
             "email": new_user.email
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        print(str(e))
-        return {
-            "status":"Failure",
-            "Message": "Internal error at register route"
-        }
+        print(f"ERROR: Registration failed - {str(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal error at register route: {str(e)}")
 
 @app.post('/login')
 async def login(user: UserLogin, response: Response):
+    # Validate password length (bcrypt has 72-byte limit)
+    if len(user.password.encode('utf-8')) > 72:
+        raise HTTPException(
+            status_code=400,
+            detail="Password is too long. Maximum length is 72 characters."
+        )
+
     prisma = await get_prisma()
 
     existing_user = await prisma.user.find_first(
@@ -151,7 +215,7 @@ async def login(user: UserLogin, response: Response):
     )
     if existing_user is None:
         raise HTTPException(status_code=404, detail="User not found")
-    
+
     hashed_password_from_db = existing_user.hashedPassword
     is_valid = verify_password(user.password, hashed_password_from_db)
     
@@ -184,6 +248,7 @@ async def login(user: UserLogin, response: Response):
         httponly=True,
         secure=False,
         samesite="lax",
+        path="/",
         max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
     )
     
@@ -194,11 +259,24 @@ async def login(user: UserLogin, response: Response):
         "email": existing_user.email
     }
 
+@app.post('/logout')
+async def logout(response: Response):
+    response.delete_cookie(
+        key="refresh_token",
+        path="/",
+        httponly=True,
+        samesite="lax"
+    )
+    return {"message": "Logged out successfully"}
+
 @app.post('/refresh')
 async def refresh(request: Request, response: Response):
     prisma = await get_prisma()
     
+    print("DEBUG: All cookies:", request.cookies)
     refresh_token = request.cookies.get("refresh_token")
+    print("DEBUG: refresh_token from cookie:", refresh_token)
+    
     if not refresh_token:
         raise HTTPException(status_code=401, detail="Refresh token not found")
     
@@ -210,8 +288,8 @@ async def refresh(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Invalid refresh token")
     
     # Check if refresh token has expired
-    from datetime import datetime
-    if token_record.expiresAt < datetime.utcnow():
+    from datetime import datetime, timezone
+    if token_record.expiresAt < datetime.now(timezone.utc):
         # Delete expired token
         await prisma.refreshtoken.delete(
             where={'token': refresh_token}
@@ -257,6 +335,7 @@ async def refresh(request: Request, response: Response):
         httponly=True,
         secure=False,
         samesite="lax",
+        path="/",
         max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60
     )
     
@@ -266,6 +345,41 @@ async def refresh(request: Request, response: Response):
     }
 
 # --- Assessment Endpoints ---
+def _extract_json_from_response(response_text: str) -> dict:
+    """Extract JSON from Gemini response, handling markdown code blocks."""
+    if not response_text:
+        raise ValueError("Empty response from Gemini")
+
+    response_text = response_text.strip()
+
+    # Remove markdown code blocks if present
+    if "```json" in response_text:
+        response_text = response_text.split("```json")[1].split("```")[0].strip()
+    elif "```" in response_text:
+        response_text = response_text.split("```")[1].split("```")[0].strip()
+
+    # Find JSON object boundaries
+    start_idx = response_text.find('{')
+    end_idx = response_text.rfind('}')
+
+    if start_idx == -1 or end_idx == -1:
+        raise ValueError("Could not find JSON object in response")
+
+    json_text = response_text[start_idx:end_idx + 1]
+    return json.loads(json_text)
+
+def _check_answer_correct(user_selection: str, correct_answer: str) -> bool:
+    """Check if user's answer is correct, handling both letter-only and full text formats."""
+    user_selection = user_selection.strip()
+    correct_answer = correct_answer.strip()
+
+    # If user selected just a letter (e.g., "A"), check if it matches the first letter of correct answer
+    if len(user_selection) == 1 and user_selection.isalpha():
+        return user_selection.upper() == correct_answer[0].upper()
+    else:
+        # Otherwise do exact match
+        return user_selection == correct_answer
+
 def _sanitize_questions_for_client(questions: list) -> list:
     """Strip correct answers before returning questions to the user."""
     sanitized = []
@@ -301,15 +415,45 @@ async def create_assessment(
             prompt_text = f"Domain: {domain}\nGoal: {data.goal or 'General Skill Assessment'}\nPlease generate a skill dependency graph."
             config = types.GenerateContentConfig(system_instruction=skill_graph_generation_instruction)
 
+            print(f"DEBUG: Calling Gemini API for skill graph...")
             res = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=prompt_text,
                 config=config
             )
-            graph_data = json.loads(res.text)
-            skill_graph = SkillGraph.from_dict(graph_data)
+            print(f"DEBUG: Gemini response received. Length: {len(res.text) if res.text else 0}")
+            print(f"DEBUG: Raw response (first 500 chars): {res.text[:500] if res.text else 'Empty response'}")
+
+            # Try to extract JSON from response (handle markdown code blocks)
+            response_text = res.text.strip()
+
+            # Remove markdown code blocks if present
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+
+            # Find JSON object boundaries
+            start_idx = response_text.find('{')
+            end_idx = response_text.rfind('}')
+
+            if start_idx != -1 and end_idx != -1:
+                json_text = response_text[start_idx:end_idx + 1]
+                print(f"DEBUG: Extracted JSON: {json_text[:200]}...")
+                graph_data = json.loads(json_text)
+                skill_graph = SkillGraph.from_dict(graph_data)
+                print("DEBUG: Skill graph generated successfully")
+            else:
+                print(f"ERROR: Could not find JSON object in response")
+                skill_graph = None
+        except json.JSONDecodeError as json_error:
+            print(f"ERROR: Failed to parse Gemini response as JSON: {str(json_error)}")
+            print(f"ERROR: Raw response: {res.text if res else 'No response'}")
+            skill_graph = None
         except Exception as graph_error:
-            print("Error generating skill graph:", str(graph_error))
+            print(f"ERROR: Error generating skill graph: {str(graph_error)}")
+            import traceback
+            traceback.print_exc()
             skill_graph = None
 
         if adaptive_mode:
@@ -326,7 +470,7 @@ async def create_assessment(
                     contents=prompt_text,
                     config=config
                 )
-                ai_data = json.loads(res.text)
+                ai_data = _extract_json_from_response(res.text)
                 question_pool = ai_data.get("question_pool", {})
             except Exception as pool_error:
                 print("Error generating question pool, falling back to single question:", str(pool_error))
@@ -347,7 +491,7 @@ async def create_assessment(
                         contents=prompt_text,
                         config=config
                     )
-                    ai_data = json.loads(res.text)
+                    ai_data = _extract_json_from_response(res.text)
                     questions = [ai_data.get("question", {})]
                     question_pool = {}
                 except Exception as single_error:
@@ -378,7 +522,7 @@ async def create_assessment(
                         contents=prompt_text,
                         config=config
                     )
-                    ai_data = json.loads(res.text)
+                    ai_data = _extract_json_from_response(res.text)
                     questions = [ai_data.get("question", {})]
                     question_pool = {}
                     next_id = 2
@@ -412,7 +556,7 @@ async def create_assessment(
                 contents=prompt_text,
                 config=config
             )
-            ai_data = json.loads(res.text)
+            ai_data = _extract_json_from_response(res.text)
             questions = ai_data.get("questions", [])
 
             # Ensure question IDs exist
@@ -501,7 +645,7 @@ async def get_assessment(
         response["adaptive_mode"] = True
         response["current_difficulty"] = assessment.currentDifficulty
         response["next_question_index"] = assessment.nextQuestionIndex
-        adaptive_path = json.loads(assessment.adaptivePath) if assessment.adaptivePath else []
+        adaptive_path = json.loads(assessment.adaptivePath) if isinstance(assessment.adaptivePath, str) else (assessment.adaptivePath if assessment.adaptivePath else [])
         response["adaptive_path"] = adaptive_path
     else:
         response["adaptive_mode"] = False
@@ -590,7 +734,7 @@ async def generate_roadmap(
                 contents=prompt_text,
                 config=config
             )
-            exercise_data = json.loads(res.text)
+            exercise_data = _extract_json_from_response(res.text)
             exercises[step.skill_name] = exercise_data
 
         # Update roadmap with exercises
@@ -633,9 +777,9 @@ async def get_next_question(
 
     questions = json.loads(assessment.questions) if isinstance(assessment.questions, str) else assessment.questions
     answers = json.loads(assessment.answers) if isinstance(assessment.answers, str) else assessment.answers
-    adaptive_path = json.loads(assessment.adaptivePath) if assessment.adaptivePath else []
+    adaptive_path = json.loads(assessment.adaptivePath) if isinstance(assessment.adaptivePath, str) else (assessment.adaptivePath if assessment.adaptivePath else [])
     skills = json.loads(assessment.selectedSkills) if isinstance(assessment.selectedSkills, str) else assessment.selectedSkills
-    question_pool = json.loads(assessment.questionPool) if assessment.questionPool else {}
+    question_pool = json.loads(assessment.questionPool) if isinstance(assessment.questionPool, str) else (assessment.questionPool if assessment.questionPool else {})
 
     current_difficulty = assessment.currentDifficulty
     next_question_index = assessment.nextQuestionIndex
@@ -653,7 +797,7 @@ async def get_next_question(
             if not q_obj:
                 raise HTTPException(status_code=404, detail="Question not found")
 
-            is_correct = (previous_answer.selected_option == q_obj.get("correct_answer"))
+            is_correct = _check_answer_correct(previous_answer.selected_option, q_obj.get("correct_answer", ""))
 
             # Store the answer
             answers.append({
@@ -676,10 +820,10 @@ async def get_next_question(
                 contents=input_text,
                 config=config
             )
-            eval_result = json.loads(res.text)
+            eval_result = _extract_json_from_response(res.text)
 
             # Store rubric evaluation
-            rubric_scores = json.loads(assessment.rubricScores) if assessment.rubricScores else []
+            rubric_scores = json.loads(assessment.rubricScores) if isinstance(assessment.rubricScores, str) else (assessment.rubricScores if assessment.rubricScores else [])
             rubric_evaluation = {
                 "question_id": previous_answer.question_id,
                 "concept": q_obj.get("concepts_tested", ["general"])[0] if q_obj.get("concepts_tested") else "general",
@@ -774,14 +918,14 @@ async def get_next_question(
             # Continue with simple evaluation if AI fails
             q_map = {q["id"]: q for q in questions}
             q_obj = q_map.get(previous_answer.question_id)
-            is_correct = (previous_answer.selected_option == q_obj.get("correct_answer")) if q_obj else False
+            is_correct = _check_answer_correct(previous_answer.selected_option, q_obj.get("correct_answer", "")) if q_obj else False
             answers.append({
                 "question_id": previous_answer.question_id,
                 "selected_option": previous_answer.selected_option
             })
 
             # Create minimal rubric evaluation
-            rubric_scores = json.loads(assessment.rubricScores) if assessment.rubricScores else []
+            rubric_scores = json.loads(assessment.rubricScores) if isinstance(assessment.rubricScores, str) else (assessment.rubricScores if assessment.rubricScores else [])
             rubric_evaluation = {
                 "question_id": previous_answer.question_id,
                 "concept": q_obj.get("concepts_tested", ["general"])[0] if q_obj.get("concepts_tested") else "general",
@@ -808,7 +952,7 @@ async def get_next_question(
     # Check if we've reached the question budget
     if next_question_index > assessment.questionBudget:
         # Generate competency evidence if rubric scores exist
-        rubric_scores = json.loads(assessment.rubricScores) if assessment.rubricScores else []
+        rubric_scores = json.loads(assessment.rubricScores) if isinstance(assessment.rubricScores, str) else (assessment.rubricScores if assessment.rubricScores else [])
         competency_evidence = None
         competency_profile = None
         coverage = None
@@ -878,7 +1022,7 @@ async def get_next_question(
                         contents=prompt_text,
                         config=config
                     )
-                    ai_data = json.loads(res.text)
+                    ai_data = _extract_json_from_response(res.text)
                     new_question = ai_data.get("question", {})
 
                     # Assign new question ID
@@ -946,7 +1090,7 @@ async def get_next_question(
     except Exception as e:
         print("Error generating next question:", str(e))
         # End assessment gracefully on error
-        rubric_scores = json.loads(assessment.rubricScores) if assessment.rubricScores else []
+        rubric_scores = json.loads(assessment.rubricScores) if isinstance(assessment.rubricScores, str) else (assessment.rubricScores if assessment.rubricScores else [])
         competency_evidence = None
         competency_profile = None
         coverage = None
@@ -1030,7 +1174,7 @@ async def submit_answers(
             # Evaluate each answer individually for rubric scoring
             for ans in updated_answers:
                 q_obj = q_map.get(ans["question_id"], {})
-                is_correct = (ans["selected_option"] == q_obj.get("correct_answer"))
+                is_correct = _check_answer_correct(ans["selected_option"], q_obj.get("correct_answer", ""))
 
                 input_text = f"Goal: {assessment.goal or 'Assessment'}\nSkills: {skills_str}\n"
                 input_text += f"Question: {q_obj.get('question', '')}\n"
@@ -1046,7 +1190,7 @@ async def submit_answers(
                     contents=input_text,
                     config=config
                 )
-                rubric_eval = json.loads(res.text)
+                rubric_eval = _extract_json_from_response(res.text)
 
                 rubric_evaluation = {
                     "question_id": ans["question_id"],
@@ -1074,7 +1218,7 @@ async def submit_answers(
                 contents=input_text,
                 config=config
             )
-            eval_result = json.loads(res.text)
+            eval_result = _extract_json_from_response(res.text)
 
             # Generate competency evidence
             competency_evidence = aggregate_concept_evidence(rubric_scores_list, questions)
@@ -1134,10 +1278,10 @@ async def get_assessment_results(
     questions = json.loads(assessment.questions) if isinstance(assessment.questions, str) else assessment.questions
     answers = json.loads(assessment.answers) if isinstance(assessment.answers, str) else assessment.answers
     eval_result = json.loads(assessment.result) if isinstance(assessment.result, str) else assessment.result
-    adaptive_path = json.loads(assessment.adaptivePath) if assessment.adaptivePath else []
-    rubric_scores = json.loads(assessment.rubricScores) if assessment.rubricScores else []
-    competency_evidence = json.loads(assessment.competencyEvidence) if assessment.competencyEvidence else None
-    concept_coverage = json.loads(assessment.conceptCoverage) if assessment.conceptCoverage else None
+    adaptive_path = json.loads(assessment.adaptivePath) if isinstance(assessment.adaptivePath, str) else (assessment.adaptivePath if assessment.adaptivePath else [])
+    rubric_scores = json.loads(assessment.rubricScores) if isinstance(assessment.rubricScores, str) else (assessment.rubricScores if assessment.rubricScores else [])
+    competency_evidence = json.loads(assessment.competencyEvidence) if isinstance(assessment.competencyEvidence, str) else assessment.competencyEvidence
+    concept_coverage = json.loads(assessment.conceptCoverage) if isinstance(assessment.conceptCoverage, str) else assessment.conceptCoverage
 
     # Score calculation
     q_map = {q["id"]: q for q in questions}
@@ -1146,7 +1290,7 @@ async def get_assessment_results(
     detailed_results = []
     for ans in answers:
         q_obj = q_map.get(ans["question_id"], {})
-        is_correct = (ans["selected_option"] == q_obj.get("correct_answer"))
+        is_correct = _check_answer_correct(ans["selected_option"], q_obj.get("correct_answer", ""))
         if is_correct:
             correct_count += 1
 
