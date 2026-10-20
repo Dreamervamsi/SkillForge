@@ -71,7 +71,7 @@ export function AuthLayout({ children }: AuthLayoutProps) {
         {/* Footer / Citation */}
         <div className="relative z-10 border-t border-zinc-800/50 pt-6">
           <p className="text-xs text-zinc-500">
-            &copy; {new Date().getFullYear()} SkillForge AI. Built for high-performance developer teams.
+            &copy; SkillForge AI. Built for high-performance developer teams.
           </p>
         </div>
       </div>

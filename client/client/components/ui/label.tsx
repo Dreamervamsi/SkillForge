@@ -1,20 +1,23 @@
-import { Label as LabelPrimitive } from "@base-ui/react/label"
+import * as React from "react"
 import { cn } from "@/lib/utils"
 
-function Label({
-  className,
-  ...props
-}: LabelPrimitive.Props) {
-  return (
-    <LabelPrimitive
-      data-slot="label"
-      className={cn(
-        "text-sm font-medium leading-none text-zinc-300 select-none group-data-[disabled=true]:pointer-events-none group-data-[disabled=true]:opacity-50 peer-disabled:cursor-not-allowed peer-disabled:opacity-50",
-        className
-      )}
-      {...props}
-    />
-  )
-}
+export interface LabelProps
+  extends React.LabelHTMLAttributes<HTMLLabelElement> {}
+
+const Label = React.forwardRef<HTMLLabelElement, LabelProps>(
+  ({ className, ...props }, ref) => {
+    return (
+      <label
+        ref={ref}
+        className={cn(
+          "text-sm font-medium leading-none text-zinc-300 select-none peer-disabled:cursor-not-allowed peer-disabled:opacity-50",
+          className
+        )}
+        {...props}
+      />
+    )
+  }
+)
+Label.displayName = "Label"
 
 export { Label }
