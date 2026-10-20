@@ -1,3 +1,6 @@
 .env
 node_modules/
 .venv/
+l-spec/
+__pycache__/
+*.pyc
