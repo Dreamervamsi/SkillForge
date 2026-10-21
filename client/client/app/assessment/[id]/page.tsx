@@ -67,7 +67,7 @@ function AssessmentInterfaceContent() {
           toast.info("Assessment Already Completed", {
             description: "Redirecting to your result and gap analysis report...",
           })
-          router.replace(`/results/${assessmentId}`)
+          router.replace(`/assessment/${assessmentId}/results`)
           return
         }
 
@@ -111,7 +111,7 @@ function AssessmentInterfaceContent() {
       })
       // Lock session and redirect after brief delay
       setTimeout(() => {
-        router.push(`/results/${assessmentId}`)
+        router.push(`/assessment/${assessmentId}/results`)
       }, 2000)
     },
   })
@@ -135,7 +135,7 @@ function AssessmentInterfaceContent() {
           toast.success("Assessment Completed!", {
             description: res.reason || "You have completed all questions in the budget.",
           })
-          router.push(`/results/${session.id}`)
+          router.push(`/assessment/${session.id}/results`)
           return
         }
 
@@ -169,7 +169,7 @@ function AssessmentInterfaceContent() {
           toast.success("Assessment Completed!", {
             description: "Calculating your competency profile and skill gaps...",
           })
-          router.push(`/results/${session.id}`)
+          router.push(`/assessment/${session.id}/results`)
         } else {
           setCurrentQuestion(session.questions[currentIndex + 1])
           setSelectedOption(null)
@@ -242,7 +242,7 @@ function AssessmentInterfaceContent() {
         <p className="text-sm text-zinc-400 mb-6 text-center max-w-md">
           The time limit for this assessment session has reached zero. Your answers have been saved.
         </p>
-        <Link href={`/results/${assessmentId}`}>
+        <Link href={`/assessment/${assessmentId}/results`}>
           <Button className="bg-indigo-600 hover:bg-indigo-500 text-white">View Gap Analysis Report</Button>
         </Link>
       </div>

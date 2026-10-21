@@ -196,6 +196,12 @@ export default function OnboardingPage() {
 
   // Final Submission to FastAPI Backend
   const onSub = async (data: OnboardingFormData) => {
+    
+    if (event && event.type !== 'submit') {
+      event.preventDefault()
+      return
+    }
+    
     setIsSubmitting(true)
 
     // Bridge Payload Gap:
@@ -496,10 +502,14 @@ export default function OnboardingPage() {
                     {EXPERIENCE_LEVELS.map((exp) => {
                       const isSelected = formValues.experience_level === exp.id
                       return (
-                        <div
+                        <button
+                          type="button"
                           key={exp.id}
-                          onClick={() => setValue("experience_level", exp.id, { shouldValidate: true })}
-                          className={`cursor-pointer p-4 rounded-xl border text-left transition-all duration-200 flex items-center justify-between ${
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            setValue("experience_level", exp.id, { shouldValidate: true })
+                          }}
+                          className={`w-full cursor-pointer p-4 rounded-xl border text-left transition-all duration-200 flex items-center justify-between ${
                             isSelected
                               ? "border-indigo-500 bg-indigo-500/10 ring-1 ring-indigo-500/50 shadow-md shadow-indigo-500/10"
                               : "border-zinc-800/80 bg-zinc-900/40 hover:border-zinc-700 hover:bg-zinc-800/50"
@@ -510,7 +520,7 @@ export default function OnboardingPage() {
                             <p className="text-xs text-zinc-400 mt-0.5">{exp.description}</p>
                           </div>
                           {isSelected && <Check className="size-5 text-indigo-400 shrink-0 ml-3" />}
-                        </div>
+                        </button>
                       )
                     })}
                   </div>
@@ -631,9 +641,10 @@ export default function OnboardingPage() {
                       <input
                         type="checkbox"
                         checked={formValues.assessment_config?.adaptive_mode ?? true}
-                        onChange={(e) =>
+                        onChange={(e) =>{
+                          e.preventDefault()
                           setValue("assessment_config.adaptive_mode", e.target.checked)
-                        }
+                        }}
                         className="size-5 rounded border-zinc-800 bg-zinc-900 text-indigo-600 focus:ring-indigo-500 accent-indigo-600 cursor-pointer"
                       />
                     </div>
