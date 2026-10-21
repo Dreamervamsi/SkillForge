@@ -195,7 +195,7 @@ export default function OnboardingPage() {
   }
 
   // Final Submission to FastAPI Backend
-  const onSubmit = async (data: OnboardingFormData) => {
+  const onSub = async (data: OnboardingFormData) => {
     setIsSubmitting(true)
 
     // Bridge Payload Gap:
@@ -316,7 +316,7 @@ export default function OnboardingPage() {
         {/* Wizard Form Card */}
         <Card className="w-full border-zinc-800/80 bg-zinc-900/60 shadow-2xl backdrop-blur-xl overflow-hidden">
           <CardContent className="p-8">
-            <form onSubmit={handleSubmit(onSubmit)}>
+            <form onSubmit={handleSubmit(onSub)}>
               {/* STEP 1: LEARNING GOAL */}
               {step === 1 && (
                 <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-300">
@@ -372,6 +372,7 @@ export default function OnboardingPage() {
                     <Label htmlFor="custom-goal">Or enter a custom goal / role target:</Label>
                     <Input
                       id="custom-goal"
+                      type="text"
                       placeholder="e.g., Senior DevOps Specialist, Distributed Systems Architect..."
                       value={formValues.goal || ""}
                       onChange={(e) => setValue("goal", e.target.value, { shouldValidate: true })}
@@ -425,6 +426,7 @@ export default function OnboardingPage() {
                     <div className="flex gap-2">
                       <Input
                         id="custom-skill"
+                        type="text"
                         placeholder="e.g., Kafka, Rust, Terraform, FastAPI..."
                         value={customSkillInput}
                         onChange={(e) => setCustomSkillInput(e.target.value)}
@@ -524,6 +526,11 @@ export default function OnboardingPage() {
                       placeholder="e.g., Designed a URL shortener with Redis cache invalidation and Postgres persistence..."
                       value={formValues.project_description || ""}
                       onChange={(e) => setValue("project_description", e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && !e.shiftKey) {
+                          e.preventDefault()
+                        }
+                      }}
                       className="w-full rounded-lg border border-zinc-800 bg-zinc-950/60 p-3 text-sm text-zinc-100 placeholder:text-zinc-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50"
                     />
                   </div>
