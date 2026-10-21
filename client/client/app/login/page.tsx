@@ -72,8 +72,7 @@ export default function LoginPage() {
         description: `Successfully signed in as ${data.username || "User"}.`,
       })
 
-      // Redirect to dashboard or home page
-      router.push("/")
+      router.push("/onboarding")
     } catch (err) {
       console.error("Login error:", err)
       const msg = "Unable to connect to authentication server. Please try again later."

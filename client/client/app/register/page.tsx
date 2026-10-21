@@ -78,8 +78,7 @@ export default function RegisterPage() {
         description: `Welcome to SkillForge AI, ${data.username || "User"}!`,
       })
 
-      // Redirect to home or onboarding
-      router.push("/")
+      router.push("/onboarding")
     } catch (err) {
       console.error("Register error:", err)
       const msg = "Unable to connect to registration server. Please try again later."
