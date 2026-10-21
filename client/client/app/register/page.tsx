@@ -8,6 +8,7 @@ import { Card, CardHeader, CardTitle, CardDescription, CardContent, CardFooter }
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Button } from "@/components/ui/button"
+import { API_BASE_URL } from "@/lib/api-config"
 import { toast } from "sonner"
 import { Loader2, ArrowRight, AlertCircle, CheckCircle2, Eye, EyeOff } from "lucide-react"
 
@@ -44,7 +45,7 @@ export default function RegisterPage() {
     setLoading(true)
 
     try {
-      const response = await fetch("http://127.0.0.1:8000/register", {
+      const response = await fetch(`${API_BASE_URL}/register`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",

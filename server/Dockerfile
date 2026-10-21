@@ -14,6 +14,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy Prisma schema and generate the Prisma client
 COPY prisma/ ./prisma/
+RUN prisma py fetch
 RUN prisma generate
 
 # Stage 2: Runtime
