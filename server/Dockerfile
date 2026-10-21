@@ -14,8 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy Prisma schema and generate the Prisma client
 COPY prisma/ ./prisma/
-RUN prisma py fetch
 RUN prisma generate
+RUN prisma py fetch
 
 # Stage 2: Runtime
 FROM python:3.13-slim
@@ -28,6 +28,10 @@ COPY --from=builder /usr/local/bin /usr/local/bin
 
 # Copy generated Prisma client
 COPY --from=builder /app/prisma/ ./prisma/
+
+# Copy Prisma query-engine binaries and downloaded engine cache
+COPY --from=builder /app/prisma-query-engine-* /app/
+COPY --from=builder /root/.cache/prisma-python /root/.cache/prisma-python
 
 # Copy application code
 COPY src/ ./src/
