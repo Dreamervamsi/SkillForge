@@ -449,7 +449,7 @@ async def create_assessment(
 
                 print(f"DEBUG: Calling Gemini API for skill graph...")
                 res = client.models.generate_content(
-                    model='gemini-3.8-flash',
+                    model='gemini-3.5-flash-lite',
                     contents=prompt_text,
                     config=config
                 )
@@ -501,7 +501,7 @@ async def create_assessment(
                 config = types.GenerateContentConfig(system_instruction=question_pool_generation_instruction)
 
                 res = client.models.generate_content(
-                    model='gemini-3.8-flash',
+                    model='gemini-3.5-flash-lite',
                     contents=prompt_text,
                     config=config
                 )
@@ -522,7 +522,7 @@ async def create_assessment(
                     prompt_text = f"Goal: {data.goal or 'General Skill Assessment'}\nSkills: {skills_str}\nDifficulty: {initial_difficulty}\nPlease generate exactly 1 question."
                     config = types.GenerateContentConfig(system_instruction=adaptive_question_instruction)
                     res = client.models.generate_content(
-                        model='gemini-3.8-flash',
+                        model='gemini-3.5-flash-lite',
                         contents=prompt_text,
                         config=config
                     )
@@ -553,7 +553,7 @@ async def create_assessment(
                     prompt_text = f"Goal: {data.goal or 'General Skill Assessment'}\nSkills: {skills_str}\nDifficulty: {initial_difficulty}\nPlease generate exactly 1 question."
                     config = types.GenerateContentConfig(system_instruction=adaptive_question_instruction)
                     res = client.models.generate_content(
-                        model='gemini-3.8-flash',
+                        model='gemini-3.5-flash-lite',
                         contents=prompt_text,
                         config=config
                     )
@@ -587,7 +587,7 @@ async def create_assessment(
             config = types.GenerateContentConfig(system_instruction=system_instruction)
 
             res = client.models.generate_content(
-                model='gemini-3.8-flash',
+                model='gemini-3.5-flash-lite',
                 contents=prompt_text,
                 config=config
             )
@@ -765,7 +765,7 @@ async def generate_roadmap(
 
             config = types.GenerateContentConfig(system_instruction=personalized_exercise_generation_instruction)
             res = client.models.generate_content(
-                model='gemini-3.8-flash',
+                model='gemini-3.5-flash-lite',
                 contents=prompt_text,
                 config=config
             )
@@ -851,7 +851,7 @@ async def get_next_question(
 
             config = types.GenerateContentConfig(system_instruction=adaptive_answer_evaluation_instruction)
             res = client.models.generate_content(
-                model='gemini-3.8-flash',
+                model='gemini-3.5-flash-lite',
                 contents=input_text,
                 config=config
             )
@@ -1053,7 +1053,7 @@ async def get_next_question(
                     config = types.GenerateContentConfig(system_instruction=adaptive_question_instruction)
 
                     res = client.models.generate_content(
-                        model='gemini-3.8-flash',
+                        model='gemini-3.5-flash-lite',
                         contents=prompt_text,
                         config=config
                     )
@@ -1221,7 +1221,7 @@ async def submit_answers(
 
                 config = types.GenerateContentConfig(system_instruction=adaptive_answer_evaluation_instruction)
                 res = client.models.generate_content(
-                    model='gemini-3.8-flash',
+                    model='gemini-3.5-flash-lite',
                     contents=input_text,
                     config=config
                 )
@@ -1249,7 +1249,7 @@ async def submit_answers(
 
             config = types.GenerateContentConfig(system_instruction=evaluation_instruction)
             res = client.models.generate_content(
-                model='gemini-3.8-flash',
+                model='gemini-3.5-flash-lite',
                 contents=input_text,
                 config=config
             )

@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useEffect } from "react"
+import React, { useState, useEffect, Suspense } from "react"
 import { useRouter, useParams } from "next/navigation"
 import Link from "next/link"
 import { toast } from "sonner"
@@ -28,9 +28,7 @@ import {
 } from "@/lib/assessment-service"
 import { useAssessmentTimer } from "@/lib/use-assessment-timer"
 
-export const instant = false
-
-export default function AssessmentInterfacePage() {
+function AssessmentInterfaceContent() {
   const router = useRouter()
   const params = useParams()
   const assessmentId = params.id as string
@@ -425,5 +423,30 @@ export default function AssessmentInterfacePage() {
         )}
       </main>
     </div>
+  )
+}
+
+export default function AssessmentInterfacePage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen w-full bg-zinc-950 flex flex-col items-center justify-center text-zinc-100 p-6 relative overflow-hidden">
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[35rem] h-[35rem] bg-indigo-600/10 rounded-full blur-3xl pointer-events-none" />
+        <div className="relative z-10 max-w-md w-full text-center space-y-6">
+          <div className="size-16 rounded-2xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center mx-auto shadow-xl shadow-indigo-500/10">
+            <Loader2 className="size-8 animate-pulse" />
+          </div>
+          <div className="space-y-2">
+            <h2 className="text-2xl font-bold tracking-tight text-zinc-100">
+              Loading Assessment...
+            </h2>
+            <p className="text-sm text-zinc-400 leading-relaxed">
+              Preparing your assessment session.
+            </p>
+          </div>
+        </div>
+      </div>
+    }>
+      <AssessmentInterfaceContent />
+    </Suspense>
   )
 }
