@@ -1,6 +1,8 @@
 import json
 from typing import Optional
 from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
+import asyncio
 from fastapi import FastAPI, Depends, HTTPException, Response, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from google.genai import types
@@ -51,8 +53,29 @@ from .dependencies import check_rate_limit
 from .exceptions import GeminiException
 from .auth import get_password_hash, verify_password, create_access_token, create_refresh_token_with_expiry, active_access_tokens
 from .database import get_prisma
+from .cache import skill_graph_cache
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    print("Application starting up")
+
+    # Schedule periodic cache cleanup
+    async def periodic_cache_cleanup():
+        while True:
+            await asyncio.sleep(3600)  # Run every hour
+            skill_graph_cache.clear_expired()
+
+    # Start background task
+    cleanup_task = asyncio.create_task(periodic_cache_cleanup())
+
+    yield
+
+    # Shutdown
+    print("Application shutting down")
+    cleanup_task.cancel()
+
+app = FastAPI(lifespan=lifespan)
 
 # Enable CORS for frontend
 app.add_middleware(
@@ -412,40 +435,52 @@ async def create_assessment(
         skill_graph = None
         try:
             domain = skills_str if len(skills_list) == 1 else f"{skills_list[0]} and related technologies"
-            prompt_text = f"Domain: {domain}\nGoal: {data.goal or 'General Skill Assessment'}\nPlease generate a skill dependency graph."
-            config = types.GenerateContentConfig(system_instruction=skill_graph_generation_instruction)
+            goal = data.goal or 'General Skill Assessment'
 
-            print(f"DEBUG: Calling Gemini API for skill graph...")
-            res = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt_text,
-                config=config
-            )
-            print(f"DEBUG: Gemini response received. Length: {len(res.text) if res.text else 0}")
-            print(f"DEBUG: Raw response (first 500 chars): {res.text[:500] if res.text else 'Empty response'}")
-
-            # Try to extract JSON from response (handle markdown code blocks)
-            response_text = res.text.strip()
-
-            # Remove markdown code blocks if present
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
-
-            # Find JSON object boundaries
-            start_idx = response_text.find('{')
-            end_idx = response_text.rfind('}')
-
-            if start_idx != -1 and end_idx != -1:
-                json_text = response_text[start_idx:end_idx + 1]
-                print(f"DEBUG: Extracted JSON: {json_text[:200]}...")
-                graph_data = json.loads(json_text)
-                skill_graph = SkillGraph.from_dict(graph_data)
-                print("DEBUG: Skill graph generated successfully")
+            # Check cache first
+            cached_graph = skill_graph_cache.get(domain, goal)
+            if cached_graph:
+                print("DEBUG: Using cached skill graph")
+                skill_graph = SkillGraph.from_dict(cached_graph)
             else:
-                print(f"ERROR: Could not find JSON object in response")
-                skill_graph = None
+                # Generate new skill graph
+                prompt_text = f"Domain: {domain}\nGoal: {goal}\nPlease generate a skill dependency graph."
+                config = types.GenerateContentConfig(system_instruction=skill_graph_generation_instruction)
+
+                print(f"DEBUG: Calling Gemini API for skill graph...")
+                res = client.models.generate_content(
+                    model='gemini-3.8-flash',
+                    contents=prompt_text,
+                    config=config
+                )
+                print(f"DEBUG: Gemini response received. Length: {len(res.text) if res.text else 0}")
+                print(f"DEBUG: Raw response (first 500 chars): {res.text[:500] if res.text else 'Empty response'}")
+
+                # Try to extract JSON from response (handle markdown code blocks)
+                response_text = res.text.strip()
+
+                # Remove markdown code blocks if present
+                if "```json" in response_text:
+                    response_text = response_text.split("```json")[1].split("```")[0].strip()
+                elif "```" in response_text:
+                    response_text = response_text.split("```")[1].split("```")[0].strip()
+
+                # Find JSON object boundaries
+                start_idx = response_text.find('{')
+                end_idx = response_text.rfind('}')
+
+                if start_idx != -1 and end_idx != -1:
+                    json_text = response_text[start_idx:end_idx + 1]
+                    print(f"DEBUG: Extracted JSON: {json_text[:200]}...")
+                    graph_data = json.loads(json_text)
+                    skill_graph = SkillGraph.from_dict(graph_data)
+                    print("DEBUG: Skill graph generated successfully")
+
+                    # Cache the skill graph
+                    skill_graph_cache.set(domain, goal, skill_graph)
+                else:
+                    print(f"ERROR: Could not find JSON object in response")
+                    skill_graph = None
         except json.JSONDecodeError as json_error:
             print(f"ERROR: Failed to parse Gemini response as JSON: {str(json_error)}")
             print(f"ERROR: Raw response: {res.text if res else 'No response'}")
@@ -466,7 +501,7 @@ async def create_assessment(
                 config = types.GenerateContentConfig(system_instruction=question_pool_generation_instruction)
 
                 res = client.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-3.8-flash',
                     contents=prompt_text,
                     config=config
                 )
@@ -487,7 +522,7 @@ async def create_assessment(
                     prompt_text = f"Goal: {data.goal or 'General Skill Assessment'}\nSkills: {skills_str}\nDifficulty: {initial_difficulty}\nPlease generate exactly 1 question."
                     config = types.GenerateContentConfig(system_instruction=adaptive_question_instruction)
                     res = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-3.8-flash',
                         contents=prompt_text,
                         config=config
                     )
@@ -518,7 +553,7 @@ async def create_assessment(
                     prompt_text = f"Goal: {data.goal or 'General Skill Assessment'}\nSkills: {skills_str}\nDifficulty: {initial_difficulty}\nPlease generate exactly 1 question."
                     config = types.GenerateContentConfig(system_instruction=adaptive_question_instruction)
                     res = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-3.8-flash',
                         contents=prompt_text,
                         config=config
                     )
@@ -552,7 +587,7 @@ async def create_assessment(
             config = types.GenerateContentConfig(system_instruction=system_instruction)
 
             res = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.8-flash',
                 contents=prompt_text,
                 config=config
             )
@@ -730,7 +765,7 @@ async def generate_roadmap(
 
             config = types.GenerateContentConfig(system_instruction=personalized_exercise_generation_instruction)
             res = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.8-flash',
                 contents=prompt_text,
                 config=config
             )
@@ -816,7 +851,7 @@ async def get_next_question(
 
             config = types.GenerateContentConfig(system_instruction=adaptive_answer_evaluation_instruction)
             res = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.8-flash',
                 contents=input_text,
                 config=config
             )
@@ -1018,7 +1053,7 @@ async def get_next_question(
                     config = types.GenerateContentConfig(system_instruction=adaptive_question_instruction)
 
                     res = client.models.generate_content(
-                        model='gemini-2.5-flash',
+                        model='gemini-3.8-flash',
                         contents=prompt_text,
                         config=config
                     )
@@ -1186,7 +1221,7 @@ async def submit_answers(
 
                 config = types.GenerateContentConfig(system_instruction=adaptive_answer_evaluation_instruction)
                 res = client.models.generate_content(
-                    model='gemini-2.5-flash',
+                    model='gemini-3.8-flash',
                     contents=input_text,
                     config=config
                 )
@@ -1214,7 +1249,7 @@ async def submit_answers(
 
             config = types.GenerateContentConfig(system_instruction=evaluation_instruction)
             res = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.8-flash',
                 contents=input_text,
                 config=config
             )
@@ -1347,3 +1382,20 @@ async def get_assessment_results(
         result["adaptive_mode"] = False
 
     return result
+
+@app.get('/admin/cache/stats')
+async def get_cache_stats(current_username: str = Depends(get_current_user)):
+    """Get cache statistics (admin endpoint)."""
+    return skill_graph_cache.get_stats()
+
+@app.post('/admin/cache/clear')
+async def clear_cache(current_username: str = Depends(get_current_user)):
+    """Clear the skill graph cache (admin endpoint)."""
+    skill_graph_cache.clear()
+    return {"message": "Cache cleared successfully"}
+
+@app.post('/admin/cache/clear-expired')
+async def clear_expired_cache(current_username: str = Depends(get_current_user)):
+    """Clear expired cache entries (admin endpoint)."""
+    removed = skill_graph_cache.clear_expired()
+    return {"message": f"Cleared {removed} expired entries"}
