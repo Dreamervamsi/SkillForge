@@ -5,6 +5,8 @@ interface TaskWorkspacePageProps {
   params: Promise<{ id: string }>
 }
 
+export const instant = false
+
 export default async function TaskWorkspacePage({ params }: TaskWorkspacePageProps) {
   const resolvedParams = await params
   return (

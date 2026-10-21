@@ -1,0 +1,33 @@
+services:
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: skillforge-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - DATABASE_URL=${DATABASE_URL}
+    networks:
+      - skillforge-network
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./client/client
+      dockerfile: Dockerfile
+    container_name: skillforge-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    networks:
+      - skillforge-network
+    restart: unless-stopped
+
+networks:
+  skillforge-network:
+    driver: bridge
