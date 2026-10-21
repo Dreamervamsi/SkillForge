@@ -86,7 +86,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
-        "https://skill-forge-7yzg8r7rk-dreamervamsis-projects.vercel.app"
+        "https://skill-forge-1veo14j9o-dreamervamsis-projects.vercel.app/"
     ],
     allow_credentials=True,
     allow_methods=["*"],
