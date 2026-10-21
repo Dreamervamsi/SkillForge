@@ -356,10 +356,16 @@ export function AssessmentResultsClient({ assessmentId }: ResultsClientProps) {
 
             <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto shrink-0">
               <Link
-                href="/onboarding"
-                className="inline-flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-400 text-zinc-950 font-bold px-6 py-2.5 rounded-xl shadow-lg shadow-emerald-500/10 transition-all cursor-pointer text-sm"
+                href={`/roadmap/${assessmentId}`}
+                className="inline-flex items-center justify-center gap-2 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-6 py-2.5 rounded-xl shadow-lg shadow-indigo-600/20 transition-all cursor-pointer text-sm"
               >
-                Start Targeted Practice <ArrowRight className="w-4 h-4" />
+                View Personalized Roadmap <ArrowRight className="w-4 h-4" />
+              </Link>
+              <Link
+                href="/onboarding"
+                className="inline-flex items-center justify-center gap-2 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 font-semibold px-4 py-2.5 rounded-xl transition-all cursor-pointer text-sm"
+              >
+                Start Practice Session
               </Link>
             </div>
           </div>

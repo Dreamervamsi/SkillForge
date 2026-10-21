@@ -203,3 +203,110 @@ export async function submitNonAdaptiveAnswers(
   }
   return data
 }
+
+export interface RoadmapSkillGap {
+  skill_name: string
+  gap_type: "missing" | "weak" | "needs_improvement" | string
+  current_mastery: "none" | "emerging" | "developing" | "proficient" | "advanced" | string
+  target_mastery: string
+  priority: "high" | "medium" | "low" | string
+}
+
+export interface RoadmapStepResource {
+  type?: string
+  title?: string
+  url?: string
+}
+
+export interface RoadmapStepExercise {
+  title?: string
+  description?: string
+  problem_statement?: string
+  starter_code?: string
+  solution_code?: string
+  test_cases?: Array<{ input: string; expected: string }>
+  difficulty?: string
+}
+
+export interface RoadmapStep {
+  skill_name: string
+  order: number
+  estimated_hours: number
+  concepts: string[]
+  resources: RoadmapStepResource[]
+  exercise?: RoadmapStepExercise | null
+  is_completed?: boolean
+}
+
+export interface RoadmapData {
+  goal: string
+  steps: RoadmapStep[]
+  total_estimated_hours: number
+  skill_gaps: RoadmapSkillGap[]
+}
+
+export async function fetchRoadmap(assessmentId: string, goalName?: string): Promise<RoadmapData> {
+  const url = new URL(`${API_BASE_URL}/assessments/${assessmentId}/roadmap`)
+  if (goalName) {
+    url.searchParams.append("goal_name", goalName)
+  }
+
+  const response = await fetch(url.toString(), {
+    method: "GET",
+    headers: getAuthHeaders(),
+  })
+
+  const data = await response.json()
+  if (!response.ok) {
+    throw new Error(data.detail || "Failed to generate or fetch learning roadmap")
+  }
+  return data
+}
+
+export interface TaskSubmissionPayload {
+  skill_name: string
+  solution_text?: string
+  repo_url?: string
+  notes?: string
+}
+
+export interface TaskRubricCriterion {
+  criterion: string
+  score: number
+  max_score: number
+  comments: string
+}
+
+export interface TaskFeedback {
+  passed: boolean
+  score: number
+  summary: string
+  strengths: string[]
+  improvements: string[]
+  rubric_breakdown: TaskRubricCriterion[]
+}
+
+export interface TaskSubmissionResponse {
+  assessment_id: string
+  skill_name: string
+  status: "COMPLETED" | "IN_PROGRESS"
+  feedback: TaskFeedback
+  submitted_at: string
+}
+
+export async function submitTaskSolution(
+  assessmentId: string,
+  payload: TaskSubmissionPayload
+): Promise<TaskSubmissionResponse> {
+  const response = await fetch(`${API_BASE_URL}/assessments/${assessmentId}/tasks/submit`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(payload),
+  })
+
+  const data = await response.json()
+  if (!response.ok) {
+    throw new Error(data.detail || "Failed to submit task solution")
+  }
+  return data
+}

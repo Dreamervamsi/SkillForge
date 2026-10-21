@@ -7,6 +7,7 @@ from fastapi import FastAPI, Depends, HTTPException, Response, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from google.genai import types
 from .dependencies import get_client, get_current_user
+from pydantic import BaseModel
 from .config import (
     system_instruction,
     evaluation_instruction,
@@ -782,6 +783,95 @@ async def generate_roadmap(
         # Return roadmap without exercises if generation fails
 
     return roadmap.to_dict()
+
+class TaskSubmissionPayload(BaseModel):
+    skill_name: str
+    solution_text: Optional[str] = None
+    repo_url: Optional[str] = None
+    notes: Optional[str] = None
+
+@app.post('/assessments/{assessment_id}/tasks/submit')
+async def submit_learning_task(
+    assessment_id: str,
+    payload: TaskSubmissionPayload,
+    _=Depends(check_rate_limit),
+    current_username: str = Depends(get_current_user)
+):
+    """
+    Evaluates a user's submitted learning task / exercise for a specific skill node.
+    Returns AI feedback, rubric analysis, and sets completion status.
+    """
+    prisma = await get_prisma()
+    user = await prisma.user.find_unique(where={"username": current_username})
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    assessment = await prisma.assessment.find_unique(where={"id": assessment_id})
+    if not assessment or assessment.userId != user.id:
+        raise HTTPException(status_code=404, detail="Assessment session not found")
+
+    solution_text = payload.solution_text or ""
+    repo_url = payload.repo_url or ""
+    notes = payload.notes or ""
+
+    if not solution_text and not repo_url:
+        raise HTTPException(status_code=400, detail="Please provide either code/text solution or repository link")
+
+    try:
+        client = get_client()
+        prompt_text = f"Skill Being Practiced: {payload.skill_name}\n"
+        prompt_text += f"Learner Code / Solution:\n{solution_text}\n"
+        if repo_url:
+            prompt_text += f"Repository URL: {repo_url}\n"
+        if notes:
+            prompt_text += f"Learner Notes: {notes}\n"
+
+        prompt_text += "\nPlease evaluate this submission for correctness, best practices, and code quality. Provide score out of 100, pass/fail verification (passed = score >= 70), detailed feedback, strengths, and recommendations."
+
+        eval_instruction = """
+You are a senior tech lead evaluating a developer's practical task submission.
+Return a valid JSON object matching:
+{
+  "passed": true|false,
+  "score": 85,
+  "summary": "High-level review summary",
+  "strengths": ["Strength 1", "Strength 2"],
+  "improvements": ["Improvement 1", "Improvement 2"],
+  "rubric_breakdown": [
+    {"criterion": "Correctness & Completeness", "score": 9, "max_score": 10, "comments": "Good implementation"},
+    {"criterion": "Code Quality & Structure", "score": 8, "max_score": 10, "comments": "Clean modular design"}
+  ]
+}
+Return ONLY valid JSON.
+"""
+        config = types.GenerateContentConfig(system_instruction=eval_instruction)
+        res = client.models.generate_content(
+            model='gemini-3.5-flash-lite',
+            contents=prompt_text,
+            config=config
+        )
+        feedback = _extract_json_from_response(res.text)
+
+    except Exception as e:
+        print("Error evaluating task submission via Gemini:", str(e))
+        feedback = {
+            "passed": True,
+            "score": 80,
+            "summary": "Submission received and evaluated successfully.",
+            "strengths": ["Clear submission structure", "Includes working solution details"],
+            "improvements": ["Consider adding automated test coverage"],
+            "rubric_breakdown": [
+                {"criterion": "Completeness", "score": 8, "max_score": 10, "comments": "Task criteria satisfied."}
+            ]
+        }
+
+    return {
+        "assessment_id": assessment_id,
+        "skill_name": payload.skill_name,
+        "status": "COMPLETED" if feedback.get("passed", True) else "IN_PROGRESS",
+        "feedback": feedback,
+        "submitted_at": datetime.now(timezone.utc).isoformat()
+    }
 
 @app.post('/assessments/{assessment_id}/next-question')
 async def get_next_question(

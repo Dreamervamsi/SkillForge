@@ -24,9 +24,6 @@ def get_client():
         raise GeminiException("Gemini client is not initialized. Please add your API key to the .env file.")
     return client
 
-def get_client():
-    return client
-
 async def check_rate_limit(request: Request):
     client_ip = request.client.host
     allowed = await rate_limiter.allow_request(client_ip)
